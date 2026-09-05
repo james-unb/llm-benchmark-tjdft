@@ -2,7 +2,6 @@
 
 This repository contains historical exam papers and answer keys organized by year.
 
-## 📚 Available Files
 
 | Year | Exam Paper | Answer Key |
 | :---: | :---: | :---: |
