@@ -113,10 +113,15 @@ def rodar_modelo(
             resultados = []
             for _, row in df.iterrows():
                 out = perguntar(modelo, montar_prompt(row))
-                resultados.append({"modelo": modelo, "Nquestao": row["Nquestao"], "usou_gpu": gpu, **out})
+                resultados.append({"modelo": modelo, "id_prova": row["id_prova"], "Nquestao": row["Nquestao"], "usou_gpu": gpu, **out})
 
             df_res = pd.DataFrame(resultados)
-            df_total = df.merge(df_res, on="Nquestao", how="left")
+            df_total = df.merge(
+                df_res,
+                on=["id_prova", "Nquestao"],
+                how="left",
+                validate="one_to_one",
+            )
             df_total["acertou"] = df_total["letra"] == df_total["gabarito"]
 
             n = len(df_total)
