@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 import pandas as pd
 import ollama
 
-from Lmm_teste_1 import teste_modelo_aut as b
+from src import teste_modelo_aut as b
 
 
 def resposta(texto="Resposta: C", **metricas):
@@ -394,14 +394,14 @@ class BenchmarkTest(unittest.TestCase):
                 cliente.pull.assert_not_called()
 
     def test_notebook_sem_saidas_e_com_mesmo_fluxo_simulado(self):
-        notebook = json.loads((b.RAIZ / "Lmm_teste_1/teste_provas.ipynb").read_text())
+        notebook = json.loads((b.RAIZ / "notebooks/teste_provas.ipynb").read_text())
         celulas = [c for c in notebook["cells"] if c["cell_type"] == "code"]
         for celula in celulas:
             self.assertEqual(celula["outputs"], [])
             self.assertIsNone(celula["execution_count"])
             compile("".join(celula["source"]), "notebook", "exec")
         # Executar importação e configuração originais; usar fixture e diretório temporários.
-        for cwd in [b.RAIZ, b.RAIZ / "Lmm_teste_1"]:
+        for cwd in [b.RAIZ, b.RAIZ / "notebooks"]:
             antigo = Path.cwd()
             try:
                 os.chdir(cwd)
