@@ -15,9 +15,15 @@ llm-benchmark-tjdft/
 │   │   └── provas_tjdft.csv                # parsed questions
 │   └── processed/
 │       └── provas_tjdft_com_gabarito.csv   # final dataset (questions + answers)
-└── src/
-    ├── parser_prova_2014_2015.py
-    └── gabaritos.py
+├── src/
+│   ├── parser_prova_2014_2015.py
+│   ├── gabaritos.py
+│   └── teste_modelo_aut.py                 # local benchmark (Ollama)
+├── notebooks/
+│   └── teste_provas.ipynb                  # notebook version of the benchmark
+├── resultados/                             # benchmark outputs
+└── tests/
+    └── test_benchmark.py
 ```
 
 - **`data/raw/`**: original files; they should not be modified.
@@ -30,6 +36,89 @@ To regenerate the intermediate and processed data:
 python src/parser_prova_2014_2015.py   # data/raw/provas -> data/interim
 python src/gabaritos.py                # data/interim -> data/processed
 ```
+
+## Benchmark local pelo Ollama
+
+O script `src/teste_modelo_aut.py` e o notebook
+`notebooks/teste_provas.ipynb` compartilham as mesmas regras de execução,
+associação e avaliação. O padrão usa `data/processed/provas_tjdft_com_gabarito.csv`
+e os modelos `gemma4:e4b-it-q4_K_M` e `gemma4:e4b-it-q8_0`.
+O prompt zero-shot, temperatura 0, seed 42, contexto 4096 e comportamento de
+raciocínio do modelo são preservados. Não há alteração explícita de `think`.
+
+Pré-requisitos: Python com `pandas` e `ollama` instalados, além do serviço Ollama
+local disponível. Não há instalação automática de pacotes. As entradas e os
+arquivos de progresso são validados antes de acessar o serviço. Modelos ausentes
+podem ser baixados na execução; há um aquecimento separado por modelo/arquivo,
+seguido de uma chamada por questão, sem repetição automática em caso de erro.
+
+Na raiz do repositório:
+
+```bash
+# Nova execução (a pasta de saída não pode conter resultados dessa combinação).
+python src/teste_modelo_aut.py
+
+# Continuar a mesma execução, preservando todas as tentativas já registradas.
+python src/teste_modelo_aut.py --retomar
+
+# Outra execução independente, com um dos modelos.
+python src/teste_modelo_aut.py --modelos gemma4:e4b-it-q4_K_M --pasta-saida resultados/nova_execucao
+python src/teste_modelo_aut.py --modelos gemma4:e4b-it-q4_K_M --pasta-saida resultados/nova_execucao --retomar
+```
+
+`--arquivos` aceita nomes sem extensão dentro de `data/processed`. Na retomada,
+repita os mesmos modelos, arquivos e pasta de saída. Uma alteração do modelo,
+do caminho ou conteúdo da entrada, dos prompts ou dos parâmetros recusa a
+retomada. Use uma nova pasta para uma execução independente; não há sobrescrita
+implícita. Não execute dois processos gravando na mesma pasta simultaneamente.
+
+Cada questão salva um `*.progresso.json` atomicamente, com configuração,
+identificação (`modelo`, `arquivo`, `id_prova`, `Nquestao`) e resultado, incluindo
+erros. Esse JSON é a fonte da retomada e deve ser preservado sem edição manual.
+O CSV é atualizado a cada questão e pode ser reconstruído a partir do JSON ao
+retomar, sem reenviar questões registradas. Um Ctrl-C durante a inferência
+registra a tentativa interrompida como falha e encerra a execução. Um término
+forçado do processo pode perder a tentativa em andamento que ainda não foi
+salva, mas mantém o último progresso completo.
+
+A associação usa `id_prova` e `Nquestao`, com `validate="one_to_one"`.
+Todos os registros são preservados no CSV, inclusive os ainda não processados,
+identificados por `processada=False` e sem valor em `acertou`.
+A acurácia considera somente questões processadas com gabarito A–E (ignorando
+espaços e caixa). Anuladas (`X`), sem gabarito e outros gabaritos inválidos são
+excluídos; respostas sem letra válida e falhas de inferência em questões
+avaliáveis continuam sendo não acertos. O relatório discrimina processadas,
+excluídas, avaliadas, acertos, acurácia, respostas inválidas e falhas, e identifica
+execuções parciais. As contagens de respostas inválidas e falhas podem se sobrepor.
+Sem questões avaliadas, a acurácia é apresentada como não aplicável.
+
+A extração é conservadora: aceita declarações explícitas como `Resposta: C`,
+`Resposta: **C**` e `Resposta: (D)`. Declarações conflitantes ou texto adicional
+incerto são inválidos; não se infere uma alternativa pela justificativa.
+Métricas desconhecidas ficam como `null` no JSON e vazias no CSV, não como zero.
+`possivel_truncamento` é apenas a heurística de contagem do prompt próxima ao
+limite de contexto, e permanece desconhecida sem essa contagem.
+
+`carregamento` informa CPU, GPU, CPU/GPU parcial ou desconhecido, a partir de
+`size` e `size_vram` de [`ollama.ps()`](https://docs.ollama.com/api/ps).
+Esses campos descrevem memória carregada, não utilização computacional da GPU.
+Falhas da consulta são registradas em `erro_consulta_gpu` sem descartar respostas.
+
+O notebook funciona a partir da raiz ou de `notebooks`, grava por padrão em
+`resultados/notebook` e exige definir `retomar = True` para continuar.
+Os dois CSVs antigos, com associações incorretas, estão preservados em
+[`resultados/invalidos`](resultados/invalidos/README.md) e não devem ser avaliados.
+
+### Verificação isolada
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -v
+```
+
+Os testes usam fixtures temporárias e clientes simulados, bloqueiam conexões de
+rede e não executam benchmarks nem downloads de modelos. Incluem execução das
+células do notebook com dados simulados. Ambiente validado nesta revisão:
+Python 3.12, pandas 3.1.0 e ollama 0.6.3.
 
 ## Exam Papers
 
