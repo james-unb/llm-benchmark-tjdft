@@ -4,8 +4,10 @@
 
 import pandas as pd
 import re
+import pathlib
 
-import pandas as pd
+# Raiz do repositório
+raiz = pathlib.Path(__file__).resolve().parent.parent
 
 gabarito_2014 = {
     "id_prova": "2014",
@@ -65,10 +67,10 @@ gabarito_2015_2 = pd.DataFrame(gabarito_2015_2)
 
 gabarito = pd.concat([gabarito_2014, gabarito_2015_1, gabarito_2015_2])
 
-provas = pd.read_csv("provas_tjdft.csv")
+provas = pd.read_csv(raiz / "data" / "interim" / "provas_tjdft.csv")
 
 provas_e_gabaritos = provas.merge(gabarito, on = ["id_prova","Nquestao"])
-provas_e_gabaritos.to_csv('provas_tjdft_com_gabarito.csv', index=False, encoding='utf-8')
+provas_e_gabaritos.to_csv(raiz / 'data' / 'processed' / 'provas_tjdft_com_gabarito.csv', index=False, encoding='utf-8')
 
 
 

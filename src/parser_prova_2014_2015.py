@@ -5,20 +5,25 @@ import pandas as pd
 import pymupdf
 
 
+# Diretórios de dados (relativos à raiz do repositório)
+raiz = pathlib.Path(__file__).resolve().parent.parent
+pasta = raiz / "data" / "raw" / "provas"
+pasta_txt = raiz / "data" / "interim" / "txt"
+pasta_txt.mkdir(parents=True, exist_ok=True)
+
 # Arquivo de entrada
-pasta = "database/"
 nomes = ['prova_2014', 'prova_2015_1', 'prova_2015_2']
 provas = pd.DataFrame()
 
 for nome in nomes:
-    arquivo = pasta + nome + ".pdf"
+    arquivo = pasta / (nome + ".pdf")
     # Extração do texto do PDF
     with pymupdf.open(arquivo) as doc:
         conteudo = chr(12).join(page.get_text() for page in doc)
 
 
     # Salva o texto extraído
-    pathlib.Path("database_txt/" + nome + ".txt").write_text(
+    (pasta_txt / (nome + ".txt")).write_text(
         conteudo,
         encoding="utf-8"
     )
@@ -107,4 +112,4 @@ for nome in nomes:
     provas = pd.concat([provas, df])
 
 print(f"Total de questões no banco: {provas.shape[0]}")
-provas.to_csv('provas_tjdft.csv', index=False, encoding='utf-8')
+provas.to_csv(raiz / 'data' / 'interim' / 'provas_tjdft.csv', index=False, encoding='utf-8')
