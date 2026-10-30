@@ -8,6 +8,7 @@ import math
 import os
 import re
 import tempfile
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -40,6 +41,11 @@ CAMPOS_RESULTADO = [
     "resposta_bruta", "letra", "tempo_s", "tokens_prompt", "tokens_saida",
     "possivel_truncamento", "erro",
 ]
+
+
+def log(mensagem):
+    """Registro de andamento com horário; flush para aparecer mesmo com saída redirecionada."""
+    print(f"[{time.strftime('%H:%M:%S')}] {mensagem}", flush=True)
 
 
 def opcoes():
@@ -155,8 +161,9 @@ def garantir_modelo(modelo, cliente):
     except Exception as exc:
         if getattr(exc, "status_code", None) != 404:
             raise
-        print(f"Modelo '{modelo}' não encontrado. Baixando...")
+        log(f"Modelo '{modelo}' não encontrado. Baixando...")
         cliente.pull(modelo)
+        log(f"Download de '{modelo}' concluído.")
 
 
 def carregar_entrada(arquivo, pasta_csv=PASTA_CSV):
@@ -299,7 +306,10 @@ def rodar_modelo(modelos=MODELOS, arquivos=ARQUIVOS, *, retomar=False,
     # Toda entrada e todo progresso são validados antes de qualquer acesso ao Ollama.
     if not modelos or not arquivos or any(not isinstance(m, str) or not m.strip() for m in modelos):
         raise ValueError("Informe ao menos um modelo e um arquivo válidos.")
+    log(f"Validando entradas: {', '.join(arquivos)}")
     entradas = [(arquivo, *carregar_entrada(arquivo, pasta_csv)) for arquivo in arquivos]
+    for arquivo, caminho, df in entradas:
+        log(f"Entrada '{arquivo}' carregada: {len(df)} questões ({caminho})")
     pasta_saida = Path(pasta_saida)
     execucoes = []
     destinos = set()
@@ -317,9 +327,12 @@ def rodar_modelo(modelos=MODELOS, arquivos=ARQUIVOS, *, retomar=False,
                 if saida.exists() or progresso.exists():
                     raise ValueError(f"Saída já existe: {saida}. Use --retomar ou uma nova --pasta-saida.")
                 resultados = []
+            modo = f"retomando com {len(resultados)} questões já registradas" if retomar else "nova execução"
+            log(f"{modelo} | {arquivo}: {modo}; saída em {saida}")
             execucoes.append((modelo, arquivo, df, saida, progresso, config, resultados))
 
     if cliente is None:
+        log("Carregando cliente Ollama")
         try:
             cliente = importlib.import_module("ollama")
         except ImportError as exc:
@@ -333,10 +346,13 @@ def rodar_modelo(modelos=MODELOS, arquivos=ARQUIVOS, *, retomar=False,
         registradas = {(r["id_prova"], r["Nquestao"]) for r in resultados}
         try:
             if len(registradas) < len(df):
+                log(f"{modelo} | {arquivo}: verificando disponibilidade do modelo")
                 garantir_modelo(modelo, cliente)
+                log(f"{modelo} | {arquivo}: aquecendo o modelo")
                 aquecimento = perguntar(modelo, "Oi", cliente)
                 if aquecimento["erro"]:
                     raise RuntimeError(f"Falha no aquecimento de {modelo}: {aquecimento['erro']}")
+                log(f"{modelo} | {arquivo}: aquecimento concluído; {len(df) - len(registradas)} questões pendentes")
                 for _, row in df.iterrows():
                     chave = (row["id_prova"], row["Nquestao"])
                     if chave in registradas:
@@ -364,10 +380,19 @@ def rodar_modelo(modelos=MODELOS, arquivos=ARQUIVOS, *, retomar=False,
                     registradas.add(chave)
                     total = associar_resultados(df, resultados)
                     salvar_atomico(saida, lambda f: total.to_csv(f, index=False))
+                    if out["erro"]:
+                        resumo = f"ERRO: {out['erro']}"
+                    else:
+                        resumo = f"letra={out['letra'] or 'inválida'} gabarito={str(row['gabarito']).strip()}"
+                        if out["tempo_s"] is not None:
+                            resumo += f" tempo={out['tempo_s']:.1f}s"
+                    log(f"{modelo} | {arquivo} [{len(registradas)}/{len(df)}] "
+                        f"id_prova={chave[0]} Nquestao={chave[1]} {resumo}")
                     if interrompida:
                         raise KeyboardInterrupt
         finally:
             # O JSON é a fonte da retomada; o CSV pode ser reconstruído sem inferência.
+            log(f"{modelo} | {arquivo}: gravando CSV final e relatório")
             total = associar_resultados(df, resultados)
             salvar_atomico(saida, lambda f: total.to_csv(f, index=False))
             imprimir_relatorio(total, modelo, arquivo)
