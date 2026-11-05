@@ -39,6 +39,9 @@ PASTA_SAIDA = RAIZ / "resultados"
 URL_OPENROUTER = "https://openrouter.ai/api/v1/chat/completions"
 VARIAVEL_CHAVE_OPENROUTER = "OPENROUTER_API_KEY"
 TIMEOUT_OPENROUTER_S = 300
+STATUS_REPETIVEIS = (429, 500, 502, 503, 504)
+TENTATIVAS_PADRAO = 5
+ESPERA_BASE_S = 5
 ARQUIVO_ENV = RAIZ / ".env"
 CHAVES = ["id_prova", "Nquestao"]
 CAMPOS_RESULTADO = [
@@ -248,44 +251,77 @@ def imprimir_relatorio(total, modelo, arquivo):
     )
 
 
-class ClienteOpenRouter:
-    """Adaptador mínimo: expõe chat() com o formato de resposta que perguntar() já lê."""
+def detalhe_erro(erro):
+    """O OpenRouter costuma esconder a causa real em error.metadata.raw."""
+    if not isinstance(erro, Mapping):
+        return erro
+    metadata = erro.get("metadata")
+    bruto = metadata.get("raw") if isinstance(metadata, Mapping) else None
+    partes = [p for p in (erro.get("message"), bruto if isinstance(bruto, str) else None) if p]
+    return " | ".join(partes) or None
 
-    def __init__(self, chave, http=None):
-        self.chave = chave
-        self.http = http
+
+class ClienteOpenRouter:
+    """Adaptador mínimo: expõe chat() com o formato de resposta que perguntar() já lê.
+
+    Limites de taxa (429) e falhas transitórias do provedor são repetidos com espera
+    crescente (respeitando Retry-After); `intervalo` espaça o início das requisições.
+    """
+
+    def __init__(self, chave, http=None, tentativas=TENTATIVAS_PADRAO, intervalo=0, dormir=time.sleep):
+        self.chave, self.http = chave, http
+        self.tentativas, self.intervalo, self.dormir = max(1, tentativas), max(0, intervalo), dormir
+        self.ultimo_inicio = None
+
+    def _espera(self, resposta, tentativa):
+        try:
+            return min(float(resposta.headers.get("Retry-After")), 300)
+        except (AttributeError, TypeError, ValueError):
+            return ESPERA_BASE_S * 2 ** tentativa
 
     def chat(self, model, messages, options):
         http = self.http or importlib.import_module("httpx")
-        inicio = time.perf_counter()
-        r = http.post(
-            URL_OPENROUTER, timeout=TIMEOUT_OPENROUTER_S,
-            headers={"Authorization": f"Bearer {self.chave}"},
-            json={"model": model, "messages": messages, **options},
-        )
-        duracao = time.perf_counter() - inicio
-        try:
-            corpo = r.json()
-        except ValueError:
-            corpo = {}
-        if not isinstance(corpo, Mapping):
-            corpo = {}
-        erro = corpo.get("error")
-        if r.status_code >= 400 or erro:
-            detalhe = erro.get("message") if isinstance(erro, Mapping) else erro
-            raise RuntimeError(f"{detalhe or 'Falha na requisição ao OpenRouter'} (status code: {r.status_code})")
-        escolhas = corpo.get("choices")
-        mensagem = escolhas[0].get("message") if isinstance(escolhas, list) and escolhas and isinstance(escolhas[0], Mapping) else None
-        uso = corpo.get("usage") if isinstance(corpo.get("usage"), Mapping) else {}
-        return {
-            "message": {"content": mensagem.get("content") if isinstance(mensagem, Mapping) else None},
-            "total_duration": duracao * 1e9,
-            "prompt_eval_count": uso.get("prompt_tokens"),
-            "eval_count": uso.get("completion_tokens"),
-        }
+        for tentativa in range(self.tentativas):
+            if self.intervalo and self.ultimo_inicio is not None:
+                falta = self.intervalo - (time.monotonic() - self.ultimo_inicio)
+                if falta > 0:
+                    self.dormir(falta)
+            self.ultimo_inicio = time.monotonic()
+            inicio = time.perf_counter()
+            r = http.post(
+                URL_OPENROUTER, timeout=TIMEOUT_OPENROUTER_S,
+                headers={"Authorization": f"Bearer {self.chave}"},
+                json={"model": model, "messages": messages, **options},
+            )
+            duracao = time.perf_counter() - inicio
+            try:
+                corpo = r.json()
+            except ValueError:
+                corpo = {}
+            if not isinstance(corpo, Mapping):
+                corpo = {}
+            erro = corpo.get("error")
+            if r.status_code >= 400 or erro:
+                if r.status_code in STATUS_REPETIVEIS and tentativa + 1 < self.tentativas:
+                    espera = self._espera(r, tentativa)
+                    log(f"{model}: status {r.status_code}; nova tentativa em {espera:.0f}s "
+                        f"({tentativa + 1}/{self.tentativas - 1})")
+                    self.dormir(espera)
+                    continue
+                detalhe = detalhe_erro(erro)
+                raise RuntimeError(f"{detalhe or 'Falha na requisição ao OpenRouter'} (status code: {r.status_code})")
+            escolhas = corpo.get("choices")
+            mensagem = escolhas[0].get("message") if isinstance(escolhas, list) and escolhas and isinstance(escolhas[0], Mapping) else None
+            uso = corpo.get("usage") if isinstance(corpo.get("usage"), Mapping) else {}
+            return {
+                "message": {"content": mensagem.get("content") if isinstance(mensagem, Mapping) else None},
+                "total_duration": duracao * 1e9,
+                "prompt_eval_count": uso.get("prompt_tokens"),
+                "eval_count": uso.get("completion_tokens"),
+            }
 
 
-def criar_cliente_openrouter(ambiente=None):
+def criar_cliente_openrouter(ambiente=None, intervalo=0, tentativas=TENTATIVAS_PADRAO):
     """A chave nunca é gravada em resultados.
 
     Prioridade: variável de ambiente do processo, depois o arquivo .env da raiz.
@@ -296,7 +332,7 @@ def criar_cliente_openrouter(ambiente=None):
     if not chave:
         raise RuntimeError(f"Defina {VARIAVEL_CHAVE_OPENROUTER} no ambiente ou no arquivo .env para usar --openrouter "
                            "(chave em https://openrouter.ai/settings/keys).")
-    return ClienteOpenRouter(chave)
+    return ClienteOpenRouter(chave, tentativas=tentativas, intervalo=intervalo)
 
 
 def configuracao(modelo, arquivo, caminho, df, openrouter=False):
@@ -366,10 +402,13 @@ def caminho_saida(modelo, arquivo, pasta_saida=PASTA_SAIDA, openrouter=False):
 
 
 def rodar_modelo(modelos=MODELOS, arquivos=ARQUIVOS, *, retomar=False,
-                 pasta_csv=PASTA_CSV, pasta_saida=PASTA_SAIDA, cliente=None, openrouter=False):
+                 pasta_csv=PASTA_CSV, pasta_saida=PASTA_SAIDA, cliente=None, openrouter=False,
+                 refazer_erros=False, intervalo=0, tentativas=TENTATIVAS_PADRAO):
     # Toda entrada e todo progresso são validados antes de qualquer acesso ao Ollama.
     if not modelos or not arquivos or any(not isinstance(m, str) or not m.strip() for m in modelos):
         raise ValueError("Informe ao menos um modelo e um arquivo válidos.")
+    if refazer_erros and not retomar:
+        raise ValueError("--refazer-erros só faz sentido junto com --retomar.")
     log(f"Validando entradas: {', '.join(arquivos)}")
     entradas = [(arquivo, *carregar_entrada(arquivo, pasta_csv)) for arquivo in arquivos]
     for arquivo, caminho, df in entradas:
@@ -387,6 +426,11 @@ def rodar_modelo(modelos=MODELOS, arquivos=ARQUIVOS, *, retomar=False,
             config = configuracao(modelo, arquivo, caminho, df, openrouter)
             if retomar:
                 resultados = carregar_progresso(progresso, config, df)
+                if refazer_erros:
+                    # Descarta só as tentativas com erro; as respostas válidas são preservadas.
+                    descartadas = sum(1 for r in resultados if r["erro"])
+                    resultados = [r for r in resultados if not r["erro"]]
+                    log(f"{modelo} | {arquivo}: {descartadas} tentativas com erro serão refeitas")
             else:
                 if saida.exists() or progresso.exists():
                     raise ValueError(f"Saída já existe: {saida}. Use --retomar ou uma nova --pasta-saida.")
@@ -397,7 +441,7 @@ def rodar_modelo(modelos=MODELOS, arquivos=ARQUIVOS, *, retomar=False,
 
     if cliente is None and openrouter:
         log("Carregando cliente OpenRouter")
-        cliente = criar_cliente_openrouter()
+        cliente = criar_cliente_openrouter(intervalo=intervalo, tentativas=tentativas)
     elif cliente is None:
         log("Carregando cliente Ollama")
         try:
@@ -476,6 +520,12 @@ def criar_parser():
     parser.add_argument("--retomar", action="store_true", help="Reutiliza o progresso compatível, inclusive tentativas com erro.")
     parser.add_argument("--pasta-saida", type=Path, default=PASTA_SAIDA,
                         help="Use uma pasta nova para iniciar outra execução sem sobrescrever resultados.")
+    parser.add_argument("--refazer-erros", action="store_true",
+                        help="Com --retomar, descarta as tentativas com erro (ex.: 429) e as refaz; mantém as respostas válidas.")
+    parser.add_argument("--intervalo", type=float, default=0,
+                        help="Segundos mínimos entre requisições no --openrouter (ex.: 3 para ~20 req/min).")
+    parser.add_argument("--tentativas", type=int, default=TENTATIVAS_PADRAO,
+                        help="Tentativas por questão no --openrouter para 429/5xx, com espera crescente.")
     parser.add_argument("--openrouter", action="store_true",
                         help=f"Usa o OpenRouter com a chave em ${VARIAVEL_CHAVE_OPENROUTER} (ambiente ou .env); "
                              "use ids do OpenRouter em --modelos (ex.: provedor/modelo:free).")
@@ -487,7 +537,8 @@ def main():
     args = parser.parse_args()
     try:
         rodar_modelo(modelos=args.modelos, arquivos=args.arquivos,
-                     retomar=args.retomar, pasta_saida=args.pasta_saida, openrouter=args.openrouter)
+                     retomar=args.retomar, pasta_saida=args.pasta_saida, openrouter=args.openrouter,
+                     refazer_erros=args.refazer_erros, intervalo=args.intervalo, tentativas=args.tentativas)
     except KeyboardInterrupt:
         print("Execução interrompida. Progresso salvo; use --retomar com a mesma configuração.")
         return 130

@@ -449,7 +449,7 @@ class BenchmarkTest(unittest.TestCase):
         http.post.return_value = Mock(status_code=200, json=Mock(return_value={
             "choices": [{"message": {"content": "Resposta: B"}}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 3}}))
-        cliente = b.ClienteOpenRouter("segredo", http=http)
+        cliente = b.ClienteOpenRouter("segredo", http=http, tentativas=1)
         out = b.perguntar("a/b:free", "q", cliente, openrouter=True)
         self.assertEqual((out["letra"], out["tokens_prompt"], out["tokens_saida"]), ("B", 10, 3))
         self.assertIsNone(out["possivel_truncamento"])
@@ -469,6 +469,38 @@ class BenchmarkTest(unittest.TestCase):
         out = b.perguntar("a/b:free", "q", cliente, openrouter=True)
         self.assertIsNone(out["erro"])
         self.assertIsNone(out["letra"])
+
+    def test_openrouter_repete_429_com_espera_e_mostra_causa_real(self):
+        def falha(status, **cab):
+            return Mock(status_code=status, headers=cab, json=Mock(return_value={"error": {
+                "message": "Provider returned error", "metadata": {"raw": "free-models-per-min"}}}))
+        ok = Mock(status_code=200, headers={}, json=Mock(return_value={
+            "choices": [{"message": {"content": "Resposta: A"}}]}))
+        http, dormir = Mock(), Mock()
+        http.post.side_effect = [falha(429, **{"Retry-After": "7"}), falha(502), ok]
+        cliente = b.ClienteOpenRouter("k", http=http, tentativas=5, dormir=dormir)
+        self.assertEqual(b.perguntar("m", "q", cliente, openrouter=True)["letra"], "A")
+        self.assertEqual([c.args[0] for c in dormir.call_args_list], [7, 10])
+        http.post.side_effect = [falha(429)] * 2
+        out = b.perguntar("m", "q", b.ClienteOpenRouter("k", http=http, tentativas=2, dormir=dormir), openrouter=True)
+        self.assertIn("free-models-per-min", out["erro"])
+        self.assertIn("429", out["erro"])
+        http.post.side_effect = [Mock(status_code=401, headers={}, json=Mock(return_value={"error": {"message": "x"}}))]
+        b.perguntar("m", "q", b.ClienteOpenRouter("k", http=http, tentativas=5, dormir=dormir), openrouter=True)
+        self.assertEqual(http.post.call_count, 6)  # 3 + 2 + 1: o 401 não é repetido
+
+    def test_refazer_erros_reprocessa_so_as_falhas(self):
+        self.rodar(ClienteSimulado([resposta(), RuntimeError("429"), resposta()]), openrouter=True)
+        cliente = ClienteSimulado([resposta("Resposta: B")])
+        with self.assertRaises(ValueError):
+            self.rodar(cliente, openrouter=True, refazer_erros=True)
+        self.rodar(cliente, openrouter=True, retomar=True, refazer_erros=True)
+        self.assertEqual(len(cliente.perguntas), 1)
+        progresso = b.caminho_saida("modelo", "entrada", self.saida, openrouter=True).with_suffix(".progresso.json")
+        resultados = json.loads(progresso.read_text())["resultados"]
+        self.assertEqual(len(resultados), 3)
+        self.assertTrue(all(r["erro"] is None for r in resultados))
+        self.assertEqual(sorted(r["letra"] for r in resultados), ["B", "C", "C"])
 
     def test_cliente_openrouter_exige_chave_e_le_env_com_prioridade_do_ambiente(self):
         with self.assertRaises(RuntimeError):

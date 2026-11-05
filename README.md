@@ -87,9 +87,17 @@ e `keep_alive` não se aplicam, não há download, aquecimento nem consulta a `p
 (`carregamento` é `openrouter`) e `possivel_truncamento` fica desconhecido. A
 saída recebe o sufixo `_openrouter` e o progresso marca `"provedor": "openrouter"`,
 de modo que execuções locais e do OpenRouter não se misturam nem se retomam
-mutuamente. Modelos gratuitos têm limites de requisições definidos pelo
-OpenRouter; erros como 429 são registrados por questão (sem repetição
-automática) e podem ser retomados com `--retomar`. Os resultados não são
+mutuamente.
+
+Modelos gratuitos têm limites de requisições definidos pelo OpenRouter (por
+minuto e por dia). Para respeitá-los, 429 e falhas transitórias do provedor
+(500/502/503/504) são repetidos até `--tentativas` vezes (padrão 5) com espera
+crescente, respeitando `Retry-After`; `--intervalo SEGUNDOS` espaça as
+requisições (ex.: `--intervalo 3` para cerca de 20 por minuto). Esgotadas as
+tentativas, o erro é registrado na questão, com a causa informada pelo provedor.
+Como `--retomar` mantém tentativas com erro, use `--retomar --refazer-erros`
+para descartar apenas as falhas e refazê-las, preservando as respostas válidas.
+Um limite diário esgotado não se resolve com repetição: aguarde o reset. Os resultados não são
 diretamente comparáveis com os do Ollama local: o servidor, a quantização e o
 modelo mudam.
 
