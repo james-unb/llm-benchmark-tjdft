@@ -35,6 +35,8 @@ ARQUIVOS = ("provas_tjdft_com_gabarito",)
 RAIZ = Path(__file__).resolve().parent.parent
 PASTA_CSV = RAIZ / "data" / "processed"
 PASTA_SAIDA = RAIZ / "resultados"
+HOST_CLOUD = "https://ollama.com"
+VARIAVEL_CHAVE_CLOUD = "OLLAMA_API_KEY"
 CHAVES = ["id_prova", "Nquestao"]
 CAMPOS_RESULTADO = [
     "modelo", "arquivo", *CHAVES, "carregamento", "erro_consulta_gpu",
@@ -239,8 +241,22 @@ def imprimir_relatorio(total, modelo, arquivo):
     )
 
 
-def configuracao(modelo, arquivo, caminho, df):
-    return {
+def criar_cliente_cloud(ambiente=None, modulo=None):
+    """Cliente da API direta do Ollama Cloud; a chave vem só do ambiente, nunca é gravada."""
+    chave = (os.environ if ambiente is None else ambiente).get(VARIAVEL_CHAVE_CLOUD, "").strip()
+    if not chave:
+        raise RuntimeError(f"Defina a variável de ambiente {VARIAVEL_CHAVE_CLOUD} para usar --cloud "
+                           "(chave em https://ollama.com/settings/keys).")
+    if modulo is None:
+        try:
+            modulo = importlib.import_module("ollama")
+        except ImportError as exc:
+            raise RuntimeError("Instale o pacote Python 'ollama' no ambiente antes de executar o benchmark.") from exc
+    return modulo.Client(host=HOST_CLOUD, headers={"Authorization": f"Bearer {chave}"})
+
+
+def configuracao(modelo, arquivo, caminho, df, cloud=False):
+    config = {
         "versao": 1, "modelo": modelo, "arquivo": arquivo,
         "entrada": str(caminho.resolve()),
         "entrada_sha256": hashlib.sha256(caminho.read_bytes()).hexdigest(),
@@ -250,6 +266,9 @@ def configuracao(modelo, arquivo, caminho, df):
             [montar_prompt(row) for _, row in df.iterrows()], ensure_ascii=False,
         ).encode()).hexdigest(),
     }
+    if cloud:  # Só presente na nuvem, para não invalidar progressos locais existentes.
+        config["cloud"] = True
+    return config
 
 
 def salvar_atomico(caminho, escrever):
@@ -296,13 +315,13 @@ def carregar_progresso(caminho, config, df):
     return resultados
 
 
-def caminho_saida(modelo, arquivo, pasta_saida=PASTA_SAIDA):
-    nome_seguro = re.sub(r"[^\w.-]", "_", modelo)
+def caminho_saida(modelo, arquivo, pasta_saida=PASTA_SAIDA, cloud=False):
+    nome_seguro = re.sub(r"[^\w.-]", "_", modelo) + ("_cloud" if cloud else "")
     return Path(pasta_saida) / f"resultados_{nome_seguro}_{arquivo}.csv"
 
 
 def rodar_modelo(modelos=MODELOS, arquivos=ARQUIVOS, *, retomar=False,
-                 pasta_csv=PASTA_CSV, pasta_saida=PASTA_SAIDA, cliente=None):
+                 pasta_csv=PASTA_CSV, pasta_saida=PASTA_SAIDA, cliente=None, cloud=False):
     # Toda entrada e todo progresso são validados antes de qualquer acesso ao Ollama.
     if not modelos or not arquivos or any(not isinstance(m, str) or not m.strip() for m in modelos):
         raise ValueError("Informe ao menos um modelo e um arquivo válidos.")
@@ -315,12 +334,12 @@ def rodar_modelo(modelos=MODELOS, arquivos=ARQUIVOS, *, retomar=False,
     destinos = set()
     for arquivo, caminho, df in entradas:
         for modelo in modelos:
-            saida = caminho_saida(modelo, arquivo, pasta_saida)
+            saida = caminho_saida(modelo, arquivo, pasta_saida, cloud)
             progresso = saida.with_suffix(".progresso.json")
             if saida in destinos:
                 raise ValueError(f"Combinações repetidas ou nomes de saída conflitantes: {saida}.")
             destinos.add(saida)
-            config = configuracao(modelo, arquivo, caminho, df)
+            config = configuracao(modelo, arquivo, caminho, df, cloud)
             if retomar:
                 resultados = carregar_progresso(progresso, config, df)
             else:
@@ -331,7 +350,10 @@ def rodar_modelo(modelos=MODELOS, arquivos=ARQUIVOS, *, retomar=False,
             log(f"{modelo} | {arquivo}: {modo}; saída em {saida}")
             execucoes.append((modelo, arquivo, df, saida, progresso, config, resultados))
 
-    if cliente is None:
+    if cliente is None and cloud:
+        log(f"Carregando cliente Ollama Cloud ({HOST_CLOUD})")
+        cliente = criar_cliente_cloud()
+    elif cliente is None:
         log("Carregando cliente Ollama")
         try:
             cliente = importlib.import_module("ollama")
@@ -347,7 +369,8 @@ def rodar_modelo(modelos=MODELOS, arquivos=ARQUIVOS, *, retomar=False,
         try:
             if len(registradas) < len(df):
                 log(f"{modelo} | {arquivo}: verificando disponibilidade do modelo")
-                garantir_modelo(modelo, cliente)
+                if not cloud:  # Na nuvem não há download local.
+                    garantir_modelo(modelo, cliente)
                 log(f"{modelo} | {arquivo}: aquecendo o modelo")
                 aquecimento = perguntar(modelo, "Oi", cliente)
                 if aquecimento["erro"]:
@@ -363,8 +386,8 @@ def rodar_modelo(modelos=MODELOS, arquivos=ARQUIVOS, *, retomar=False,
                     except KeyboardInterrupt:
                         out = resultado_erro("Inferência interrompida pelo usuário; tentativa registrada sem reenvio automático.")
                         interrompida = True
-                    gpu = {"carregamento": "desconhecido", "erro_consulta_gpu": None}
-                    if not interrompida:
+                    gpu = {"carregamento": "cloud" if cloud else "desconhecido", "erro_consulta_gpu": None}
+                    if not interrompida and not cloud:
                         try:
                             gpu = usou_gpu(modelo, cliente)
                         except KeyboardInterrupt:
@@ -405,6 +428,9 @@ def criar_parser():
     parser.add_argument("--retomar", action="store_true", help="Reutiliza o progresso compatível, inclusive tentativas com erro.")
     parser.add_argument("--pasta-saida", type=Path, default=PASTA_SAIDA,
                         help="Use uma pasta nova para iniciar outra execução sem sobrescrever resultados.")
+    parser.add_argument("--cloud", action="store_true",
+                        help=f"Usa a API do Ollama Cloud ({HOST_CLOUD}) com a chave em ${VARIAVEL_CHAVE_CLOUD}; "
+                             "use nomes de modelo da nuvem (ex.: gpt-oss:120b).")
     return parser
 
 
@@ -413,7 +439,7 @@ def main():
     args = parser.parse_args()
     try:
         rodar_modelo(modelos=args.modelos, arquivos=args.arquivos,
-                     retomar=args.retomar, pasta_saida=args.pasta_saida)
+                     retomar=args.retomar, pasta_saida=args.pasta_saida, cloud=args.cloud)
     except KeyboardInterrupt:
         print("Execução interrompida. Progresso salvo; use --retomar com a mesma configuração.")
         return 130

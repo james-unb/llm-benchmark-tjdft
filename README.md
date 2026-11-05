@@ -66,6 +66,22 @@ python src/teste_modelo_aut.py --modelos gemma4:e4b-it-q4_K_M --pasta-saida resu
 python src/teste_modelo_aut.py --modelos gemma4:e4b-it-q4_K_M --pasta-saida resultados/nova_execucao --retomar
 ```
 
+### Modelos de nuvem (Ollama Cloud)
+
+`--cloud` envia as questões à API do Ollama Cloud (`https://ollama.com`) em vez do
+serviço local. Crie uma chave em <https://ollama.com/settings/keys> e exporte-a;
+ela é lida apenas do ambiente e nunca gravada em arquivos:
+
+```bash
+export OLLAMA_API_KEY=...
+python src/teste_modelo_aut.py --cloud --modelos gpt-oss:120b --pasta-saida resultados/cloud
+```
+
+Use os nomes de modelo da nuvem (sem o sufixo `-cloud`). Nesse modo não há
+download (`pull`) nem consulta a `ps()`: `carregamento` é registrado como `cloud`,
+a saída recebe o sufixo `_cloud` e o progresso marca `"cloud": true`, de modo que
+execuções locais e de nuvem do mesmo modelo não se misturam nem retomam uma à outra.
+
 `--arquivos` aceita nomes sem extensão dentro de `data/processed`. Na retomada,
 repita os mesmos modelos, arquivos e pasta de saída. Uma alteração do modelo,
 do caminho ou conteúdo da entrada, dos prompts ou dos parâmetros recusa a

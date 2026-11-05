@@ -424,6 +424,29 @@ class BenchmarkTest(unittest.TestCase):
         self.assertEqual(b.relatorio(contexto["df_final"])["acertos"], 3)
         self.assertEqual(len(cliente.perguntas), 3)
 
+    def test_cloud_nao_baixa_nem_consulta_ps_e_isola_saida(self):
+        cliente = ClienteSimulado([resposta()] * 3)
+        self.rodar(cliente, cloud=True)
+        cliente.show.assert_not_called()
+        cliente.pull.assert_not_called()
+        cliente.ps.assert_not_called()
+        progresso = b.caminho_saida("modelo", "entrada", self.saida, cloud=True).with_suffix(".progresso.json")
+        estado = json.loads(progresso.read_text())
+        self.assertTrue(estado["configuracao"]["cloud"])
+        self.assertTrue(all(r["carregamento"] == "cloud" for r in estado["resultados"]))
+        self.assertNotEqual(b.caminho_saida("modelo", "entrada", self.saida),
+                            b.caminho_saida("modelo", "entrada", self.saida, cloud=True))
+        self.assertNotIn("cloud", b.configuracao("modelo", "entrada", *b.carregar_entrada("entrada", self.entrada)))
+
+    def test_cliente_cloud_exige_chave_e_usa_host_oficial(self):
+        with self.assertRaises(RuntimeError):
+            b.criar_cliente_cloud(ambiente={}, modulo=Mock())
+        modulo = Mock()
+        b.criar_cliente_cloud(ambiente={"OLLAMA_API_KEY": "segredo"}, modulo=modulo)
+        modulo.Client.assert_called_once_with(
+            host="https://ollama.com", headers={"Authorization": "Bearer segredo"})
+        self.assertTrue(b.criar_parser().parse_args(["--cloud"]).cloud)
+
 
 if __name__ == "__main__":
     unittest.main()
