@@ -424,6 +424,125 @@ class BenchmarkTest(unittest.TestCase):
         self.assertEqual(b.relatorio(contexto["df_final"])["acertos"], 3)
         self.assertEqual(len(cliente.perguntas), 3)
 
+    def test_openrouter_nao_baixa_nem_aquece_nem_consulta_ps_e_isola_saida(self):
+        cliente = ClienteSimulado([resposta()] * 3)
+        self.rodar(cliente, openrouter=True)
+        cliente.show.assert_not_called()
+        cliente.pull.assert_not_called()
+        cliente.ps.assert_not_called()
+        self.assertEqual(cliente.aquecimentos, 0)
+        self.assertEqual(len(cliente.perguntas), 3)
+        self.assertNotIn("keep_alive", cliente.perguntas[0])
+        self.assertEqual(cliente.perguntas[0]["options"], {"temperature": 0, "seed": 42})
+        progresso = b.caminho_saida("modelo", "entrada", self.saida, openrouter=True).with_suffix(".progresso.json")
+        estado = json.loads(progresso.read_text())
+        self.assertEqual(estado["configuracao"]["provedor"], "openrouter")
+        self.assertNotIn("keep_alive", estado["configuracao"])
+        self.assertTrue(all(r["carregamento"] == "openrouter" for r in estado["resultados"]))
+        self.assertNotEqual(b.caminho_saida("modelo", "entrada", self.saida),
+                            b.caminho_saida("modelo", "entrada", self.saida, openrouter=True))
+        local = b.configuracao("modelo", "entrada", *b.carregar_entrada("entrada", self.entrada))
+        self.assertNotIn("provedor", local)
+
+    def test_cliente_openrouter_traduz_resposta_e_erros(self):
+        http = Mock()
+        http.post.return_value = Mock(status_code=200, json=Mock(return_value={
+            "choices": [{"message": {"content": "Resposta: B"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 3}}))
+        cliente = b.ClienteOpenRouter("segredo", http=http, tentativas=1)
+        out = b.perguntar("a/b:free", "q", cliente, openrouter=True)
+        self.assertEqual((out["letra"], out["tokens_prompt"], out["tokens_saida"]), ("B", 10, 3))
+        self.assertIsNone(out["possivel_truncamento"])
+        self.assertGreaterEqual(out["tempo_s"], 0)
+        chamada = http.post.call_args
+        self.assertEqual(chamada.args[0], b.URL_OPENROUTER)
+        self.assertEqual(chamada.kwargs["headers"], {"Authorization": "Bearer segredo"})
+        self.assertEqual(chamada.kwargs["json"]["model"], "a/b:free")
+        self.assertEqual(chamada.kwargs["json"]["seed"], 42)
+        http.post.return_value = Mock(status_code=429, json=Mock(return_value={"error": {"message": "limite"}}))
+        out = b.perguntar("a/b:free", "q", cliente, openrouter=True)
+        self.assertIn("limite", out["erro"])
+        self.assertIn("429", out["erro"])
+        http.post.return_value = Mock(status_code=502, json=Mock(side_effect=ValueError))
+        self.assertIn("502", b.perguntar("a/b:free", "q", cliente, openrouter=True)["erro"])
+        for corpo in ({"choices": []}, {}, {"choices": [{"message": {"content": None}}]}):
+            http.post.return_value = Mock(status_code=200, json=Mock(return_value=corpo))
+            out = b.perguntar("a/b:free", "q", cliente, openrouter=True)
+            self.assertIn("não retornou conteúdo", out["erro"])
+            self.assertIsNone(out["letra"])
+
+    def test_openrouter_repete_429_com_espera_e_mostra_causa_real(self):
+        def falha(status, **cab):
+            return Mock(status_code=status, headers=cab, json=Mock(return_value={"error": {
+                "message": "Provider returned error", "metadata": {"raw": "free-models-per-min"}}}))
+        ok = Mock(status_code=200, headers={}, json=Mock(return_value={
+            "choices": [{"message": {"content": "Resposta: A"}}]}))
+        http, dormir = Mock(), Mock()
+        http.post.side_effect = [falha(429, **{"Retry-After": "7"}), falha(502), ok]
+        cliente = b.ClienteOpenRouter("k", http=http, tentativas=5, dormir=dormir)
+        self.assertEqual(b.perguntar("m", "q", cliente, openrouter=True)["letra"], "A")
+        self.assertEqual([c.args[0] for c in dormir.call_args_list], [7, 10])
+        http.post.side_effect = [falha(429)] * 2
+        out = b.perguntar("m", "q", b.ClienteOpenRouter("k", http=http, tentativas=2, dormir=dormir), openrouter=True)
+        self.assertIn("free-models-per-min", out["erro"])
+        self.assertIn("429", out["erro"])
+        http.post.side_effect = [Mock(status_code=401, headers={}, json=Mock(return_value={"error": {"message": "x"}}))]
+        b.perguntar("m", "q", b.ClienteOpenRouter("k", http=http, tentativas=5, dormir=dormir), openrouter=True)
+        self.assertEqual(http.post.call_count, 6)  # 3 + 2 + 1: o 401 não é repetido
+
+    def test_openrouter_retry_after_acima_do_teto_falha_sem_repetir_antes_do_prazo(self):
+        http, dormir = Mock(), Mock()
+        http.post.side_effect = [Mock(status_code=429, headers={"Retry-After": "301"},
+                                      json=Mock(return_value={"error": {"message": "limite"}}))]
+        out = b.perguntar("m", "q", b.ClienteOpenRouter("k", http=http, tentativas=5, dormir=dormir), openrouter=True)
+        self.assertEqual(http.post.call_count, 1)
+        dormir.assert_not_called()
+        self.assertIn("429", out["erro"])
+        self.assertIn("excede o teto de 300s", out["erro"])
+        ok = Mock(status_code=200, headers={}, json=Mock(return_value={"choices": [{"message": {"content": "Resposta: D"}}]}))
+        http.post.side_effect = [Mock(status_code=429, headers={"Retry-After": "300"}, json=Mock(return_value={})), ok]
+        out = b.perguntar("m", "q", b.ClienteOpenRouter("k", http=http, tentativas=5, dormir=dormir), openrouter=True)
+        self.assertEqual(out["letra"], "D")
+        dormir.assert_called_once_with(300.0)
+
+    def test_refazer_erros_reprocessa_resposta_sem_conteudo_do_openrouter(self):
+        http = Mock()
+        http.post.return_value = Mock(status_code=200, headers={}, json=Mock(return_value={"choices": []}))
+        self.rodar(b.ClienteOpenRouter("k", http=http, tentativas=1), openrouter=True)
+        cliente = ClienteSimulado([resposta(), resposta(), resposta()])
+        self.rodar(cliente, openrouter=True, retomar=True, refazer_erros=True)
+        self.assertEqual(len(cliente.perguntas), 3)
+        progresso = b.caminho_saida("modelo", "entrada", self.saida, openrouter=True).with_suffix(".progresso.json")
+        self.assertTrue(all(r["erro"] is None for r in json.loads(progresso.read_text())["resultados"]))
+
+    def test_refazer_erros_reprocessa_so_as_falhas(self):
+        self.rodar(ClienteSimulado([resposta(), RuntimeError("429"), resposta()]), openrouter=True)
+        cliente = ClienteSimulado([resposta("Resposta: B")])
+        with self.assertRaises(ValueError):
+            self.rodar(cliente, openrouter=True, refazer_erros=True)
+        self.rodar(cliente, openrouter=True, retomar=True, refazer_erros=True)
+        self.assertEqual(len(cliente.perguntas), 1)
+        progresso = b.caminho_saida("modelo", "entrada", self.saida, openrouter=True).with_suffix(".progresso.json")
+        resultados = json.loads(progresso.read_text())["resultados"]
+        self.assertEqual(len(resultados), 3)
+        self.assertTrue(all(r["erro"] is None for r in resultados))
+        self.assertEqual(sorted(r["letra"] for r in resultados), ["B", "C", "C"])
+
+    def test_cliente_openrouter_exige_chave_e_le_env_com_prioridade_do_ambiente(self):
+        with self.assertRaises(RuntimeError):
+            b.criar_cliente_openrouter(ambiente={})
+        self.assertEqual(b.criar_cliente_openrouter(ambiente={"OPENROUTER_API_KEY": " x "}).chave, "x")
+        self.assertTrue(b.criar_parser().parse_args(["--openrouter"]).openrouter)
+        arquivo = Path(self.tmp.name) / ".env"
+        arquivo.write_text('OPENROUTER_API_KEY="do_env"\n')
+        with patch.object(b, "ARQUIVO_ENV", arquivo), patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(b.criar_cliente_openrouter().chave, "do_env")
+            with patch.dict(os.environ, {"OPENROUTER_API_KEY": "do_shell"}):
+                self.assertEqual(b.criar_cliente_openrouter().chave, "do_shell")
+            arquivo.write_text("")
+            with self.assertRaises(RuntimeError):
+                b.criar_cliente_openrouter()
+
 
 if __name__ == "__main__":
     unittest.main()
