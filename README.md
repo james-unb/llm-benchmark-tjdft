@@ -66,23 +66,32 @@ python src/teste_modelo_aut.py --modelos gemma4:e4b-it-q4_K_M --pasta-saida resu
 python src/teste_modelo_aut.py --modelos gemma4:e4b-it-q4_K_M --pasta-saida resultados/nova_execucao --retomar
 ```
 
-### Modelos de nuvem (Ollama Cloud)
+### Modelos pelo OpenRouter
 
-`--cloud` envia as questões à API do Ollama Cloud (`https://ollama.com`) em vez do
-serviço local. Crie uma chave em <https://ollama.com/settings/keys> e coloque-a em um
-arquivo `.env` na raiz (copie de `.env.example`; o `.env` é ignorado pelo git).
-Uma variável `OLLAMA_API_KEY` já exportada no shell tem prioridade sobre o `.env`.
+`--openrouter` envia as questões ao [OpenRouter](https://openrouter.ai) em vez do
+serviço Ollama local, o que permite usar modelos hospedados, inclusive os
+gratuitos (sufixo `:free`; veja [openrouter.ai/models?max_price=0](https://openrouter.ai/models?max_price=0)).
+Crie uma chave em <https://openrouter.ai/settings/keys> e coloque-a em um arquivo
+`.env` na raiz (copie de `.env.example`; o `.env` é ignorado pelo git). Uma
+`OPENROUTER_API_KEY` já exportada no shell tem prioridade sobre o `.env`.
 A chave nunca é gravada nos resultados:
 
 ```bash
-cp .env.example .env   # edite e preencha OLLAMA_API_KEY
-python src/teste_modelo_aut.py --cloud --modelos gpt-oss:120b --pasta-saida resultados/cloud
+cp .env.example .env   # edite e preencha OPENROUTER_API_KEY
+python src/teste_modelo_aut.py --openrouter --modelos <id-do-modelo>:free --pasta-saida resultados/openrouter
 ```
 
-Use os nomes de modelo da nuvem (sem o sufixo `-cloud`). Nesse modo não há
-download (`pull`) nem consulta a `ps()`: `carregamento` é registrado como `cloud`,
-a saída recebe o sufixo `_cloud` e o progresso marca `"cloud": true`, de modo que
-execuções locais e de nuvem do mesmo modelo não se misturam nem retomam uma à outra.
+Use o id exato do modelo mostrado no OpenRouter. Nesse modo a requisição usa a
+API HTTP do OpenRouter (via `httpx`), com `temperature` 0 e `seed` 42; `num_ctx`
+e `keep_alive` não se aplicam, não há download, aquecimento nem consulta a `ps()`
+(`carregamento` é `openrouter`) e `possivel_truncamento` fica desconhecido. A
+saída recebe o sufixo `_openrouter` e o progresso marca `"provedor": "openrouter"`,
+de modo que execuções locais e do OpenRouter não se misturam nem se retomam
+mutuamente. Modelos gratuitos têm limites de requisições definidos pelo
+OpenRouter; erros como 429 são registrados por questão (sem repetição
+automática) e podem ser retomados com `--retomar`. Os resultados não são
+diretamente comparáveis com os do Ollama local: o servidor, a quantização e o
+modelo mudam.
 
 `--arquivos` aceita nomes sem extensão dentro de `data/processed`. Na retomada,
 repita os mesmos modelos, arquivos e pasta de saída. Uma alteração do modelo,

@@ -424,42 +424,66 @@ class BenchmarkTest(unittest.TestCase):
         self.assertEqual(b.relatorio(contexto["df_final"])["acertos"], 3)
         self.assertEqual(len(cliente.perguntas), 3)
 
-    def test_cloud_nao_baixa_nem_consulta_ps_e_isola_saida(self):
+    def test_openrouter_nao_baixa_nem_aquece_nem_consulta_ps_e_isola_saida(self):
         cliente = ClienteSimulado([resposta()] * 3)
-        self.rodar(cliente, cloud=True)
+        self.rodar(cliente, openrouter=True)
         cliente.show.assert_not_called()
         cliente.pull.assert_not_called()
         cliente.ps.assert_not_called()
-        progresso = b.caminho_saida("modelo", "entrada", self.saida, cloud=True).with_suffix(".progresso.json")
+        self.assertEqual(cliente.aquecimentos, 0)
+        self.assertEqual(len(cliente.perguntas), 3)
+        self.assertNotIn("keep_alive", cliente.perguntas[0])
+        self.assertEqual(cliente.perguntas[0]["options"], {"temperature": 0, "seed": 42})
+        progresso = b.caminho_saida("modelo", "entrada", self.saida, openrouter=True).with_suffix(".progresso.json")
         estado = json.loads(progresso.read_text())
-        self.assertTrue(estado["configuracao"]["cloud"])
-        self.assertTrue(all(r["carregamento"] == "cloud" for r in estado["resultados"]))
+        self.assertEqual(estado["configuracao"]["provedor"], "openrouter")
+        self.assertNotIn("keep_alive", estado["configuracao"])
+        self.assertTrue(all(r["carregamento"] == "openrouter" for r in estado["resultados"]))
         self.assertNotEqual(b.caminho_saida("modelo", "entrada", self.saida),
-                            b.caminho_saida("modelo", "entrada", self.saida, cloud=True))
-        self.assertNotIn("cloud", b.configuracao("modelo", "entrada", *b.carregar_entrada("entrada", self.entrada)))
+                            b.caminho_saida("modelo", "entrada", self.saida, openrouter=True))
+        local = b.configuracao("modelo", "entrada", *b.carregar_entrada("entrada", self.entrada))
+        self.assertNotIn("provedor", local)
 
-    def test_cliente_cloud_exige_chave_e_usa_host_oficial(self):
+    def test_cliente_openrouter_traduz_resposta_e_erros(self):
+        http = Mock()
+        http.post.return_value = Mock(status_code=200, json=Mock(return_value={
+            "choices": [{"message": {"content": "Resposta: B"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 3}}))
+        cliente = b.ClienteOpenRouter("segredo", http=http)
+        out = b.perguntar("a/b:free", "q", cliente, openrouter=True)
+        self.assertEqual((out["letra"], out["tokens_prompt"], out["tokens_saida"]), ("B", 10, 3))
+        self.assertIsNone(out["possivel_truncamento"])
+        self.assertGreaterEqual(out["tempo_s"], 0)
+        chamada = http.post.call_args
+        self.assertEqual(chamada.args[0], b.URL_OPENROUTER)
+        self.assertEqual(chamada.kwargs["headers"], {"Authorization": "Bearer segredo"})
+        self.assertEqual(chamada.kwargs["json"]["model"], "a/b:free")
+        self.assertEqual(chamada.kwargs["json"]["seed"], 42)
+        http.post.return_value = Mock(status_code=429, json=Mock(return_value={"error": {"message": "limite"}}))
+        out = b.perguntar("a/b:free", "q", cliente, openrouter=True)
+        self.assertIn("limite", out["erro"])
+        self.assertIn("429", out["erro"])
+        http.post.return_value = Mock(status_code=502, json=Mock(side_effect=ValueError))
+        self.assertIn("502", b.perguntar("a/b:free", "q", cliente, openrouter=True)["erro"])
+        http.post.return_value = Mock(status_code=200, json=Mock(return_value={"choices": []}))
+        out = b.perguntar("a/b:free", "q", cliente, openrouter=True)
+        self.assertIsNone(out["erro"])
+        self.assertIsNone(out["letra"])
+
+    def test_cliente_openrouter_exige_chave_e_le_env_com_prioridade_do_ambiente(self):
         with self.assertRaises(RuntimeError):
-            b.criar_cliente_cloud(ambiente={}, modulo=Mock())
-        modulo = Mock()
-        b.criar_cliente_cloud(ambiente={"OLLAMA_API_KEY": "segredo"}, modulo=modulo)
-        modulo.Client.assert_called_once_with(
-            host="https://ollama.com", headers={"Authorization": "Bearer segredo"})
-        self.assertTrue(b.criar_parser().parse_args(["--cloud"]).cloud)
-
-    def test_cliente_cloud_le_env_com_prioridade_do_ambiente(self):
+            b.criar_cliente_openrouter(ambiente={})
+        self.assertEqual(b.criar_cliente_openrouter(ambiente={"OPENROUTER_API_KEY": " x "}).chave, "x")
+        self.assertTrue(b.criar_parser().parse_args(["--openrouter"]).openrouter)
         arquivo = Path(self.tmp.name) / ".env"
-        arquivo.write_text('OLLAMA_API_KEY="do_env"\n')
-        modulo = Mock()
+        arquivo.write_text('OPENROUTER_API_KEY="do_env"\n')
         with patch.object(b, "ARQUIVO_ENV", arquivo), patch.dict(os.environ, {}, clear=True):
-            b.criar_cliente_cloud(modulo=modulo)
-            self.assertEqual(modulo.Client.call_args.kwargs["headers"], {"Authorization": "Bearer do_env"})
-            with patch.dict(os.environ, {"OLLAMA_API_KEY": "do_shell"}):
-                b.criar_cliente_cloud(modulo=modulo)
-            self.assertEqual(modulo.Client.call_args.kwargs["headers"], {"Authorization": "Bearer do_shell"})
+            self.assertEqual(b.criar_cliente_openrouter().chave, "do_env")
+            with patch.dict(os.environ, {"OPENROUTER_API_KEY": "do_shell"}):
+                self.assertEqual(b.criar_cliente_openrouter().chave, "do_shell")
             arquivo.write_text("")
             with self.assertRaises(RuntimeError):
-                b.criar_cliente_cloud(modulo=modulo)
+                b.criar_cliente_openrouter()
 
 
 if __name__ == "__main__":
