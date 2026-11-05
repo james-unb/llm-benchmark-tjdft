@@ -92,7 +92,10 @@ mutuamente.
 Modelos gratuitos têm limites de requisições definidos pelo OpenRouter (por
 minuto e por dia). Para respeitá-los, 429 e falhas transitórias do provedor
 (500/502/503/504) são repetidos até `--tentativas` vezes (padrão 5) com espera
-crescente, respeitando `Retry-After`; `--intervalo SEGUNDOS` espaça as
+crescente, respeitando `Retry-After` até um teto de 300 s (se o servidor pedir
+mais, a questão é registrada com erro em vez de repetir antes do prazo); uma
+resposta sem conteúdo (sem `choices`) também é registrada como erro;
+`--intervalo SEGUNDOS` espaça as
 requisições (ex.: `--intervalo 3` para cerca de 20 por minuto). Esgotadas as
 tentativas, o erro é registrado na questão, com a causa informada pelo provedor.
 Como `--retomar` mantém tentativas com erro, use `--retomar --refazer-erros`

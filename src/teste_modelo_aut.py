@@ -42,6 +42,7 @@ TIMEOUT_OPENROUTER_S = 300
 STATUS_REPETIVEIS = (429, 500, 502, 503, 504)
 TENTATIVAS_PADRAO = 5
 ESPERA_BASE_S = 5
+ESPERA_MAXIMA_S = 300  # teto para Retry-After; acima disso a tentativa falha
 ARQUIVO_ENV = RAIZ / ".env"
 CHAVES = ["id_prova", "Nquestao"]
 CAMPOS_RESULTADO = [
@@ -265,17 +266,21 @@ class ClienteOpenRouter:
     """Adaptador mínimo: expõe chat() com o formato de resposta que perguntar() já lê.
 
     Limites de taxa (429) e falhas transitórias do provedor são repetidos com espera
-    crescente (respeitando Retry-After); `intervalo` espaça o início das requisições.
+    crescente, respeitando Retry-After até `espera_maxima` segundos; se o servidor pedir
+    mais que isso, não há nova tentativa antes do prazo: a requisição falha e a questão
+    fica com erro (refazível com --refazer-erros). `intervalo` espaça o início das requisições.
     """
 
-    def __init__(self, chave, http=None, tentativas=TENTATIVAS_PADRAO, intervalo=0, dormir=time.sleep):
+    def __init__(self, chave, http=None, tentativas=TENTATIVAS_PADRAO, intervalo=0, dormir=time.sleep,
+                 espera_maxima=ESPERA_MAXIMA_S):
         self.chave, self.http = chave, http
         self.tentativas, self.intervalo, self.dormir = max(1, tentativas), max(0, intervalo), dormir
+        self.espera_maxima = espera_maxima
         self.ultimo_inicio = None
 
     def _espera(self, resposta, tentativa):
         try:
-            return min(float(resposta.headers.get("Retry-After")), 300)
+            return max(0.0, float(resposta.headers.get("Retry-After")))
         except (AttributeError, TypeError, ValueError):
             return ESPERA_BASE_S * 2 ** tentativa
 
@@ -304,6 +309,11 @@ class ClienteOpenRouter:
             if r.status_code >= 400 or erro:
                 if r.status_code in STATUS_REPETIVEIS and tentativa + 1 < self.tentativas:
                     espera = self._espera(r, tentativa)
+                    if espera > self.espera_maxima:
+                        detalhe = detalhe_erro(erro)
+                        raise RuntimeError(
+                            f"{detalhe or 'Falha na requisição ao OpenRouter'} (status code: {r.status_code}; "
+                            f"Retry-After de {espera:.0f}s excede o teto de {self.espera_maxima:.0f}s)")
                     log(f"{model}: status {r.status_code}; nova tentativa em {espera:.0f}s "
                         f"({tentativa + 1}/{self.tentativas - 1})")
                     self.dormir(espera)
@@ -312,9 +322,13 @@ class ClienteOpenRouter:
                 raise RuntimeError(f"{detalhe or 'Falha na requisição ao OpenRouter'} (status code: {r.status_code})")
             escolhas = corpo.get("choices")
             mensagem = escolhas[0].get("message") if isinstance(escolhas, list) and escolhas and isinstance(escolhas[0], Mapping) else None
+            conteudo = mensagem.get("content") if isinstance(mensagem, Mapping) else None
+            if conteudo is None:
+                # Sem resposta do modelo: registrar como erro para que --refazer-erros a refaça.
+                raise RuntimeError(f"OpenRouter não retornou conteúdo de resposta (status code: {r.status_code})")
             uso = corpo.get("usage") if isinstance(corpo.get("usage"), Mapping) else {}
             return {
-                "message": {"content": mensagem.get("content") if isinstance(mensagem, Mapping) else None},
+                "message": {"content": conteudo},
                 "total_duration": duracao * 1e9,
                 "prompt_eval_count": uso.get("prompt_tokens"),
                 "eval_count": uso.get("completion_tokens"),

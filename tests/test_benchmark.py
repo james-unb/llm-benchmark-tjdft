@@ -465,10 +465,11 @@ class BenchmarkTest(unittest.TestCase):
         self.assertIn("429", out["erro"])
         http.post.return_value = Mock(status_code=502, json=Mock(side_effect=ValueError))
         self.assertIn("502", b.perguntar("a/b:free", "q", cliente, openrouter=True)["erro"])
-        http.post.return_value = Mock(status_code=200, json=Mock(return_value={"choices": []}))
-        out = b.perguntar("a/b:free", "q", cliente, openrouter=True)
-        self.assertIsNone(out["erro"])
-        self.assertIsNone(out["letra"])
+        for corpo in ({"choices": []}, {}, {"choices": [{"message": {"content": None}}]}):
+            http.post.return_value = Mock(status_code=200, json=Mock(return_value=corpo))
+            out = b.perguntar("a/b:free", "q", cliente, openrouter=True)
+            self.assertIn("não retornou conteúdo", out["erro"])
+            self.assertIsNone(out["letra"])
 
     def test_openrouter_repete_429_com_espera_e_mostra_causa_real(self):
         def falha(status, **cab):
@@ -488,6 +489,31 @@ class BenchmarkTest(unittest.TestCase):
         http.post.side_effect = [Mock(status_code=401, headers={}, json=Mock(return_value={"error": {"message": "x"}}))]
         b.perguntar("m", "q", b.ClienteOpenRouter("k", http=http, tentativas=5, dormir=dormir), openrouter=True)
         self.assertEqual(http.post.call_count, 6)  # 3 + 2 + 1: o 401 não é repetido
+
+    def test_openrouter_retry_after_acima_do_teto_falha_sem_repetir_antes_do_prazo(self):
+        http, dormir = Mock(), Mock()
+        http.post.side_effect = [Mock(status_code=429, headers={"Retry-After": "301"},
+                                      json=Mock(return_value={"error": {"message": "limite"}}))]
+        out = b.perguntar("m", "q", b.ClienteOpenRouter("k", http=http, tentativas=5, dormir=dormir), openrouter=True)
+        self.assertEqual(http.post.call_count, 1)
+        dormir.assert_not_called()
+        self.assertIn("429", out["erro"])
+        self.assertIn("excede o teto de 300s", out["erro"])
+        ok = Mock(status_code=200, headers={}, json=Mock(return_value={"choices": [{"message": {"content": "Resposta: D"}}]}))
+        http.post.side_effect = [Mock(status_code=429, headers={"Retry-After": "300"}, json=Mock(return_value={})), ok]
+        out = b.perguntar("m", "q", b.ClienteOpenRouter("k", http=http, tentativas=5, dormir=dormir), openrouter=True)
+        self.assertEqual(out["letra"], "D")
+        dormir.assert_called_once_with(300.0)
+
+    def test_refazer_erros_reprocessa_resposta_sem_conteudo_do_openrouter(self):
+        http = Mock()
+        http.post.return_value = Mock(status_code=200, headers={}, json=Mock(return_value={"choices": []}))
+        self.rodar(b.ClienteOpenRouter("k", http=http, tentativas=1), openrouter=True)
+        cliente = ClienteSimulado([resposta(), resposta(), resposta()])
+        self.rodar(cliente, openrouter=True, retomar=True, refazer_erros=True)
+        self.assertEqual(len(cliente.perguntas), 3)
+        progresso = b.caminho_saida("modelo", "entrada", self.saida, openrouter=True).with_suffix(".progresso.json")
+        self.assertTrue(all(r["erro"] is None for r in json.loads(progresso.read_text())["resultados"]))
 
     def test_refazer_erros_reprocessa_so_as_falhas(self):
         self.rodar(ClienteSimulado([resposta(), RuntimeError("429"), resposta()]), openrouter=True)
