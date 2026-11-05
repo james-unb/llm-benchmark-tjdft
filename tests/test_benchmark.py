@@ -447,6 +447,20 @@ class BenchmarkTest(unittest.TestCase):
             host="https://ollama.com", headers={"Authorization": "Bearer segredo"})
         self.assertTrue(b.criar_parser().parse_args(["--cloud"]).cloud)
 
+    def test_cliente_cloud_le_env_com_prioridade_do_ambiente(self):
+        arquivo = Path(self.tmp.name) / ".env"
+        arquivo.write_text('OLLAMA_API_KEY="do_env"\n')
+        modulo = Mock()
+        with patch.object(b, "ARQUIVO_ENV", arquivo), patch.dict(os.environ, {}, clear=True):
+            b.criar_cliente_cloud(modulo=modulo)
+            self.assertEqual(modulo.Client.call_args.kwargs["headers"], {"Authorization": "Bearer do_env"})
+            with patch.dict(os.environ, {"OLLAMA_API_KEY": "do_shell"}):
+                b.criar_cliente_cloud(modulo=modulo)
+            self.assertEqual(modulo.Client.call_args.kwargs["headers"], {"Authorization": "Bearer do_shell"})
+            arquivo.write_text("")
+            with self.assertRaises(RuntimeError):
+                b.criar_cliente_cloud(modulo=modulo)
+
 
 if __name__ == "__main__":
     unittest.main()

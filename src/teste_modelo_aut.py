@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pandas as pd
+from dotenv import dotenv_values
 
 
 SYSTEM = (
@@ -37,6 +38,7 @@ PASTA_CSV = RAIZ / "data" / "processed"
 PASTA_SAIDA = RAIZ / "resultados"
 HOST_CLOUD = "https://ollama.com"
 VARIAVEL_CHAVE_CLOUD = "OLLAMA_API_KEY"
+ARQUIVO_ENV = RAIZ / ".env"
 CHAVES = ["id_prova", "Nquestao"]
 CAMPOS_RESULTADO = [
     "modelo", "arquivo", *CHAVES, "carregamento", "erro_consulta_gpu",
@@ -242,11 +244,16 @@ def imprimir_relatorio(total, modelo, arquivo):
 
 
 def criar_cliente_cloud(ambiente=None, modulo=None):
-    """Cliente da API direta do Ollama Cloud; a chave vem só do ambiente, nunca é gravada."""
-    chave = (os.environ if ambiente is None else ambiente).get(VARIAVEL_CHAVE_CLOUD, "").strip()
+    """Cliente da API direta do Ollama Cloud; a chave nunca é gravada em resultados.
+
+    Prioridade: variável de ambiente do processo, depois o arquivo .env da raiz.
+    """
+    if ambiente is None:
+        ambiente = {**dotenv_values(ARQUIVO_ENV), **os.environ}
+    chave = (ambiente.get(VARIAVEL_CHAVE_CLOUD) or "").strip()
     if not chave:
         raise RuntimeError(f"Defina a variável de ambiente {VARIAVEL_CHAVE_CLOUD} para usar --cloud "
-                           "(chave em https://ollama.com/settings/keys).")
+                           "(ou no arquivo .env; chave em https://ollama.com/settings/keys).")
     if modulo is None:
         try:
             modulo = importlib.import_module("ollama")

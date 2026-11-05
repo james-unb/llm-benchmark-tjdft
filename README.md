@@ -69,11 +69,13 @@ python src/teste_modelo_aut.py --modelos gemma4:e4b-it-q4_K_M --pasta-saida resu
 ### Modelos de nuvem (Ollama Cloud)
 
 `--cloud` envia as questões à API do Ollama Cloud (`https://ollama.com`) em vez do
-serviço local. Crie uma chave em <https://ollama.com/settings/keys> e exporte-a;
-ela é lida apenas do ambiente e nunca gravada em arquivos:
+serviço local. Crie uma chave em <https://ollama.com/settings/keys> e coloque-a em um
+arquivo `.env` na raiz (copie de `.env.example`; o `.env` é ignorado pelo git).
+Uma variável `OLLAMA_API_KEY` já exportada no shell tem prioridade sobre o `.env`.
+A chave nunca é gravada nos resultados:
 
 ```bash
-export OLLAMA_API_KEY=...
+cp .env.example .env   # edite e preencha OLLAMA_API_KEY
 python src/teste_modelo_aut.py --cloud --modelos gpt-oss:120b --pasta-saida resultados/cloud
 ```
 
