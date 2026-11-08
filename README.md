@@ -66,6 +66,44 @@ python src/teste_modelo_aut.py --modelos gemma4:e4b-it-q4_K_M --pasta-saida resu
 python src/teste_modelo_aut.py --modelos gemma4:e4b-it-q4_K_M --pasta-saida resultados/nova_execucao --retomar
 ```
 
+### Modelos pelo OpenRouter
+
+`--openrouter` envia as questões ao [OpenRouter](https://openrouter.ai) em vez do
+serviço Ollama local, o que permite usar modelos hospedados, inclusive os
+gratuitos (sufixo `:free`; veja [openrouter.ai/models?max_price=0](https://openrouter.ai/models?max_price=0)).
+Crie uma chave em <https://openrouter.ai/settings/keys> e coloque-a em um arquivo
+`.env` na raiz (copie de `.env.example`; o `.env` é ignorado pelo git). Uma
+`OPENROUTER_API_KEY` já exportada no shell tem prioridade sobre o `.env`.
+A chave nunca é gravada nos resultados:
+
+```bash
+cp .env.example .env   # edite e preencha OPENROUTER_API_KEY
+python src/teste_modelo_aut.py --openrouter --modelos <id-do-modelo>:free --pasta-saida resultados/openrouter
+```
+
+Use o id exato do modelo mostrado no OpenRouter. Nesse modo a requisição usa a
+API HTTP do OpenRouter (via `httpx`), com `temperature` 0 e `seed` 42; `num_ctx`
+e `keep_alive` não se aplicam, não há download, aquecimento nem consulta a `ps()`
+(`carregamento` é `openrouter`) e `possivel_truncamento` fica desconhecido. A
+saída recebe o sufixo `_openrouter` e o progresso marca `"provedor": "openrouter"`,
+de modo que execuções locais e do OpenRouter não se misturam nem se retomam
+mutuamente.
+
+Modelos gratuitos têm limites de requisições definidos pelo OpenRouter (por
+minuto e por dia). Para respeitá-los, 429 e falhas transitórias do provedor
+(500/502/503/504) são repetidos até `--tentativas` vezes (padrão 5) com espera
+crescente, respeitando `Retry-After` até um teto de 300 s (se o servidor pedir
+mais, a questão é registrada com erro em vez de repetir antes do prazo); uma
+resposta sem conteúdo (sem `choices`) também é registrada como erro;
+`--intervalo SEGUNDOS` espaça as
+requisições (ex.: `--intervalo 3` para cerca de 20 por minuto). Esgotadas as
+tentativas, o erro é registrado na questão, com a causa informada pelo provedor.
+Como `--retomar` mantém tentativas com erro, use `--retomar --refazer-erros`
+para descartar apenas as falhas e refazê-las, preservando as respostas válidas.
+Um limite diário esgotado não se resolve com repetição: aguarde o reset. Os resultados não são
+diretamente comparáveis com os do Ollama local: o servidor, a quantização e o
+modelo mudam.
+
 `--arquivos` aceita nomes sem extensão dentro de `data/processed`. Na retomada,
 repita os mesmos modelos, arquivos e pasta de saída. Uma alteração do modelo,
 do caminho ou conteúdo da entrada, dos prompts ou dos parâmetros recusa a
