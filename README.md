@@ -1,6 +1,33 @@
 # Exam Papers and Answer Keys Collection
 
 This repository contains historical exam papers and answer keys organized by year.
+It also holds a benchmark that evaluates LLMs (via Ollama or OpenRouter) on the
+TJDFT exam questions.
+
+## Início rápido
+
+Pré-requisitos: [uv](https://docs.astral.sh/uv/getting-started/installation/)
+e, para o benchmark local, o [Ollama](https://ollama.com/) em execução.
+
+```bash
+# 1. Clonar e instalar as dependências (cria o .venv com Python 3.12 e usa o uv.lock)
+git clone <url-do-repositorio>
+cd llm-benchmark-tjdft
+uv sync
+
+# 2. (Opcional) Regenerar os dados a partir dos PDFs; o CSV final já está versionado
+uv run python src/parser_prova_2014_2015.py
+uv run python src/gabaritos.py
+
+# 3. Rodar o benchmark (Ollama local; para OpenRouter veja a seção abaixo)
+uv run python src/teste_modelo_aut.py
+
+# 4. Rodar os testes
+uv run python -m unittest discover -s tests -v
+```
+
+Os resultados são gravados em `resultados/`. Para rodar o notebook:
+`uv run jupyter lab notebooks/teste_provas.ipynb`.
 
 ## Repository Structure
 
@@ -33,8 +60,8 @@ llm-benchmark-tjdft/
 To regenerate the intermediate and processed data:
 
 ```bash
-python src/parser_prova_2014_2015.py   # data/raw/provas -> data/interim
-python src/gabaritos.py                # data/interim -> data/processed
+uv run python src/parser_prova_2014_2015.py   # data/raw/provas -> data/interim
+uv run python src/gabaritos.py                # data/interim -> data/processed
 ```
 
 ## Benchmark local pelo Ollama
@@ -46,8 +73,9 @@ e os modelos `gemma4:e4b-it-q4_K_M` e `gemma4:e4b-it-q8_0`.
 O prompt zero-shot, temperatura 0, seed 42, contexto 4096 e comportamento de
 raciocínio do modelo são preservados. Não há alteração explícita de `think`.
 
-Pré-requisitos: Python com `pandas` e `ollama` instalados, além do serviço Ollama
-local disponível. Não há instalação automática de pacotes. As entradas e os
+Pré-requisitos: [uv](https://docs.astral.sh/uv/) (instale as dependências com
+`uv sync`; o Python 3.12 é fixado em `.python-version` e o `uv.lock` garante
+versões reproduzíveis), além do serviço Ollama local disponível. As entradas e os
 arquivos de progresso são validados antes de acessar o serviço. Modelos ausentes
 podem ser baixados na execução; há um aquecimento separado por modelo/arquivo,
 seguido de uma chamada por questão, sem repetição automática em caso de erro.
@@ -56,14 +84,14 @@ Na raiz do repositório:
 
 ```bash
 # Nova execução (a pasta de saída não pode conter resultados dessa combinação).
-python src/teste_modelo_aut.py
+uv run python src/teste_modelo_aut.py
 
 # Continuar a mesma execução, preservando todas as tentativas já registradas.
-python src/teste_modelo_aut.py --retomar
+uv run python src/teste_modelo_aut.py --retomar
 
 # Outra execução independente, com um dos modelos.
-python src/teste_modelo_aut.py --modelos gemma4:e4b-it-q4_K_M --pasta-saida resultados/nova_execucao
-python src/teste_modelo_aut.py --modelos gemma4:e4b-it-q4_K_M --pasta-saida resultados/nova_execucao --retomar
+uv run python src/teste_modelo_aut.py --modelos gemma4:e4b-it-q4_K_M --pasta-saida resultados/nova_execucao
+uv run python src/teste_modelo_aut.py --modelos gemma4:e4b-it-q4_K_M --pasta-saida resultados/nova_execucao --retomar
 ```
 
 ### Modelos pelo OpenRouter
@@ -78,7 +106,7 @@ A chave nunca é gravada nos resultados:
 
 ```bash
 cp .env.example .env   # edite e preencha OPENROUTER_API_KEY
-python src/teste_modelo_aut.py --openrouter --modelos <id-do-modelo>:free --pasta-saida resultados/openrouter
+uv run python src/teste_modelo_aut.py --openrouter --modelos <id-do-modelo>:free --pasta-saida resultados/openrouter
 ```
 
 Use o id exato do modelo mostrado no OpenRouter. Nesse modo a requisição usa a
@@ -150,13 +178,13 @@ Os dois CSVs antigos, com associações incorretas, estão preservados em
 ### Verificação isolada
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -v
+PYTHONDONTWRITEBYTECODE=1 uv run python -m unittest discover -s tests -v
 ```
 
 Os testes usam fixtures temporárias e clientes simulados, bloqueiam conexões de
 rede e não executam benchmarks nem downloads de modelos. Incluem execução das
 células do notebook com dados simulados. Ambiente validado nesta revisão:
-Python 3.12, pandas 3.1.0 e ollama 0.6.3.
+Python 3.12, gerenciado com uv (versões exatas em `uv.lock`).
 
 ## Exam Papers
 
