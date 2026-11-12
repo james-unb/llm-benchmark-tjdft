@@ -1,4 +1,4 @@
-"""Regressões isoladas: nenhum teste acessa o serviço Ollama."""
+"""Isolated regressions: no test reaches the Ollama service."""
 
 import contextlib
 import copy
@@ -17,531 +17,531 @@ import ollama
 from src import teste_modelo_aut as b
 
 
-def resposta(texto="Resposta: C", **metricas):
-    return {"message": {"content": texto}, **metricas}
+def response(text="Resposta: C", **metrics):
+    return {"message": {"content": text}, **metrics}
 
 
-def questao(prova="p1", numero="1", gabarito="C"):
-    return {"id_prova": prova, "Nquestao": numero, "enunciado": f"Questão {prova}/{numero}",
-            **{letra: f"Alternativa {letra}" for letra in "ABCDE"}, "gabarito": gabarito}
+def question(exam="p1", number="1", answer_key="C"):
+    return {"id_prova": exam, "Nquestao": number, "enunciado": f"Question {exam}/{number}",
+            **{letter: f"Option {letter}" for letter in "ABCDE"}, "gabarito": answer_key}
 
 
-def registro(prova="p1", numero="1", letra="C", erro=None):
-    return {"modelo": "modelo", "arquivo": "entrada", "id_prova": prova, "Nquestao": numero,
+def record(exam="p1", number="1", letter="C", error=None):
+    return {"modelo": "model", "arquivo": "input", "id_prova": exam, "Nquestao": number,
             "carregamento": "desconhecido", "erro_consulta_gpu": None,
-            **b.resultado_erro(erro), "letra": letra}
+            **b.error_result(error), "letra": letter}
 
 
-class ClienteSimulado:
-    def __init__(self, respostas=(), gpu=None):
-        self.respostas = iter(respostas)
-        self.perguntas = []
-        self.aquecimentos = 0
+class FakeClient:
+    def __init__(self, responses=(), gpu=None):
+        self.responses = iter(responses)
+        self.asked = []
+        self.warmups = 0
         self.show = Mock()
         self.pull = Mock()
         self.ps = Mock(return_value=gpu or {"models": [
-            {"model": "modelo:latest", "size": 100, "size_vram": 50},
+            {"model": "model:latest", "size": 100, "size_vram": 50},
         ]})
 
     def chat(self, **kwargs):
         prompt = kwargs["messages"][1]["content"]
         if prompt == "Oi":
-            self.aquecimentos += 1
-            return resposta("Olá")
-        self.perguntas.append(kwargs)
-        valor = next(self.respostas)
-        if isinstance(valor, BaseException):
-            raise valor
-        return valor
+            self.warmups += 1
+            return response("Hello")
+        self.asked.append(kwargs)
+        value = next(self.responses)
+        if isinstance(value, BaseException):
+            raise value
+        return value
 
 
 class BenchmarkTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.raiz = Path(self.tmp.name)
-        self.entrada = self.raiz / "entrada"
-        self.saida = self.raiz / "saida"
-        self.entrada.mkdir()
-        self.csv = self.entrada / "entrada.csv"
-        self.gravar([questao(), questao("p2"), questao("p3")])
+        self.root = Path(self.tmp.name)
+        self.input_dir = self.root / "input"
+        self.output_dir = self.root / "output"
+        self.input_dir.mkdir()
+        self.csv = self.input_dir / "input.csv"
+        self.write_rows([question(), question("p2"), question("p3")])
         self.log = io.StringIO()
-        redirecionar = contextlib.redirect_stdout(self.log)
-        redirecionar.__enter__()
-        self.addCleanup(redirecionar.__exit__, None, None, None)
-        # Qualquer chamada de rede acidental falha, mesmo se o cliente real for usado.
-        for alvo in ["socket.create_connection", "socket.socket.connect"]:
-            bloqueio = patch(alvo, side_effect=AssertionError("Rede proibida nos testes"))
-            bloqueio.start()
-            self.addCleanup(bloqueio.stop)
+        redirect = contextlib.redirect_stdout(self.log)
+        redirect.__enter__()
+        self.addCleanup(redirect.__exit__, None, None, None)
+        # Any accidental network call fails, even if the real client is used.
+        for target in ["socket.create_connection", "socket.socket.connect"]:
+            block = patch(target, side_effect=AssertionError("Network is forbidden in tests"))
+            block.start()
+            self.addCleanup(block.stop)
 
-    def gravar(self, linhas):
-        pd.DataFrame(linhas).to_csv(self.csv, index=False)
+    def write_rows(self, rows):
+        pd.DataFrame(rows).to_csv(self.csv, index=False)
 
-    def rodar(self, cliente, **kwargs):
-        return b.rodar_modelo(modelos=("modelo",), arquivos=("entrada",),
-                             pasta_csv=self.entrada, pasta_saida=self.saida,
-                             cliente=cliente, **kwargs)
+    def run_benchmark(self, client, **kwargs):
+        return b.run_model(models=("model",), files=("input",),
+                             csv_dir=self.input_dir, output_dir=self.output_dir,
+                             client=client, **kwargs)
 
-    def progresso(self):
-        return b.caminho_saida("modelo", "entrada", self.saida).with_suffix(".progresso.json")
+    def progress(self):
+        return b.output_path("model", "input", self.output_dir).with_suffix(".progresso.json")
 
-    def test_padrao_existe_e_tem_chaves_unicas(self):
-        args = b.criar_parser().parse_args([])
-        self.assertEqual(tuple(args.arquivos), b.ARQUIVOS)
-        caminho, df = b.carregar_entrada(args.arquivos[0])
-        self.assertTrue(caminho.is_file())
+    def test_default_input_exists_and_has_unique_keys(self):
+        args = b.create_parser().parse_args([])
+        self.assertEqual(tuple(args.files), b.FILES)
+        path, df = b.load_input(args.files[0])
+        self.assertTrue(path.is_file())
         self.assertEqual(len(df), 300)
-        self.assertFalse(df.duplicated(b.CHAVES).any())
+        self.assertFalse(df.duplicated(b.KEYS).any())
 
-    def test_associacao_entre_provas_com_numeros_repetidos(self):
-        df = pd.DataFrame([questao("p1", gabarito="A"), questao("p2", gabarito="C")])
-        total = b.associar_resultados(df, [registro("p2"), registro("p1", letra="A")])
+    def test_merge_across_exams_with_repeated_numbers(self):
+        df = pd.DataFrame([question("p1", answer_key="A"), question("p2", answer_key="C")])
+        total = b.merge_results(df, [record("p2"), record("p1", letter="A")])
         self.assertEqual(total["letra"].tolist(), ["A", "C"])
-        self.assertEqual(b.relatorio(total)["acertos"], 2)
+        self.assertEqual(b.build_report(total)["correct"], 2)
         self.assertEqual(len(total), 2)
 
-    def test_associacao_rejeita_duplicatas_dos_dois_lados(self):
-        for linhas, resultados in [([questao(), questao()], [registro()]),
-                                   ([questao()], [registro(), registro()])]:
-            with self.subTest(linhas=linhas), self.assertRaises(pd.errors.MergeError):
-                b.associar_resultados(pd.DataFrame(linhas), resultados)
+    def test_merge_rejects_duplicates_on_both_sides(self):
+        for rows, results in [([question(), question()], [record()]),
+                                   ([question()], [record(), record()])]:
+            with self.subTest(rows=rows), self.assertRaises(pd.errors.MergeError):
+                b.merge_results(pd.DataFrame(rows), results)
 
-    def test_entrada_invalida_antes_de_qualquer_chamada(self):
-        for linhas, mensagem in [([questao(), questao()], "duplicadas"),
-                                 ([{k: v for k, v in questao().items() if k != "A"}], "colunas"),
-                                 ([questao(prova="")], "ausentes"),
-                                 ([{**questao(), "enunciado": ""}], "ausentes")]:
-            with self.subTest(mensagem=mensagem):
-                self.gravar(linhas)
-                cliente = Mock()
-                with self.assertRaisesRegex(ValueError, mensagem):
-                    self.rodar(cliente)
-                self.assertEqual(cliente.mock_calls, [])
-                self.assertFalse(self.saida.exists())
+    def test_invalid_input_before_any_call(self):
+        for rows, message in [([question(), question()], "duplicate"),
+                                 ([{k: v for k, v in question().items() if k != "A"}], "missing required columns"),
+                                 ([question(exam="")], "missing values"),
+                                 ([{**question(), "enunciado": ""}], "missing values")]:
+            with self.subTest(message=message):
+                self.write_rows(rows)
+                client = Mock()
+                with self.assertRaisesRegex(ValueError, message):
+                    self.run_benchmark(client)
+                self.assertEqual(client.mock_calls, [])
+                self.assertFalse(self.output_dir.exists())
 
-    def test_valida_todos_arquivos_antes_do_ollama(self):
-        cliente = Mock()
-        with self.assertRaisesRegex(ValueError, "Não foi possível ler"):
-            b.rodar_modelo(modelos=("modelo",), arquivos=("entrada", "ausente"),
-                          pasta_csv=self.entrada, pasta_saida=self.saida, cliente=cliente)
-        self.assertEqual(cliente.mock_calls, [])
+    def test_validates_all_files_before_ollama(self):
+        client = Mock()
+        with self.assertRaisesRegex(ValueError, "Could not read"):
+            b.run_model(models=("model",), files=("input", "absent"),
+                          csv_dir=self.input_dir, output_dir=self.output_dir, client=client)
+        self.assertEqual(client.mock_calls, [])
 
-    def test_entrada_vazia_e_nome_invalido(self):
-        pd.DataFrame(columns=questao().keys()).to_csv(self.csv, index=False)
-        with self.assertRaisesRegex(ValueError, "nenhuma questão"):
-            b.carregar_entrada("entrada", self.entrada)
-        with self.assertRaisesRegex(ValueError, "Nome de entrada inválido"):
-            b.carregar_entrada("../entrada", self.entrada)
+    def test_empty_input_and_invalid_name(self):
+        pd.DataFrame(columns=question().keys()).to_csv(self.csv, index=False)
+        with self.assertRaisesRegex(ValueError, "no questions found"):
+            b.load_input("input", self.input_dir)
+        with self.assertRaisesRegex(ValueError, "Invalid input name"):
+            b.load_input("../entrada", self.input_dir)
 
-    def test_extracao_conservadora(self):
-        casos = {
+    def test_conservative_extraction(self):
+        cases = {
             "Resposta: C": "C", "Resposta: **C**": "C", "Resposta: (D)": "D",
-            "resposta e justificativa": None, "Resposta: a alternativa correta é C": None,
+            "answer and rationale": None, "Resposta: the correct option is C": None,
             " **Resposta:**  **( D )** ": "D", "Resposta: `E`": "E",
             "Resposta: A ou C": None, "Resposta: C\nResposta: D": None,
             "Resposta: C\nou D": None, "Resposta: C\nResposta: C": "C",
             "Resposta: Casa": None, "A": None, "Resposta: (A) ou (B)": None,
             "Resposta: F": None, "Resposta: ** C **.": "C", None: None,
         }
-        for texto, esperado in casos.items():
-            with self.subTest(texto=texto):
-                self.assertEqual(b.extrair_letra(texto), esperado)
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(b.extract_letter(text), expected)
 
-    def test_metricas_e_campos_ausentes_ou_none(self):
-        retornos = [resposta(total_duration=None, prompt_eval_count=None, eval_count=None),
-                    resposta(), {}, {"message": None}, {"message": {"content": None}},
+    def test_metrics_and_missing_or_none_fields(self):
+        returns = [response(total_duration=None, prompt_eval_count=None, eval_count=None),
+                    response(), {}, {"message": None}, {"message": {"content": None}},
                     ollama.ChatResponse(message=ollama.Message(role="assistant", content="Resposta: C"))]
-        for retorno in retornos:
-            with self.subTest(retorno=retorno):
-                out = b.perguntar("modelo", "questão", Mock(chat=Mock(return_value=retorno)))
-                for campo in ["tempo_s", "tokens_prompt", "tokens_saida", "possivel_truncamento", "erro"]:
-                    self.assertIsNone(out[campo])
+        for ret in returns:
+            with self.subTest(ret=ret):
+                out = b.ask("model", "question", Mock(chat=Mock(return_value=ret)))
+                for field in ["tempo_s", "tokens_prompt", "tokens_saida", "possivel_truncamento", "erro"]:
+                    self.assertIsNone(out[field])
         self.assertEqual(out["letra"], "C")
 
-    def test_metricas_conhecidas_e_heuristica(self):
-        cliente = Mock(chat=Mock(return_value=resposta(total_duration=2_000_000_000,
+    def test_known_metrics_and_heuristic(self):
+        client = Mock(chat=Mock(return_value=response(total_duration=2_000_000_000,
                                                      prompt_eval_count=4090, eval_count=0)))
-        out = b.perguntar("modelo", "pergunta", cliente)
+        out = b.ask("model", "question", client)
         self.assertEqual(out["tempo_s"], 2)
         self.assertEqual(out["tokens_saida"], 0)
         self.assertTrue(out["possivel_truncamento"])
-        chamada = cliente.chat.call_args.kwargs
-        self.assertEqual(chamada["options"], {"temperature": 0, "seed": 42, "num_ctx": 4096})
-        self.assertEqual(chamada["messages"][0]["content"], b.SYSTEM)
-        self.assertEqual(set(chamada), {"model", "messages", "options", "keep_alive"})
+        call = client.chat.call_args.kwargs
+        self.assertEqual(call["options"], {"temperature": 0, "seed": 42, "num_ctx": 4096})
+        self.assertEqual(call["messages"][0]["content"], b.SYSTEM)
+        self.assertEqual(set(call), {"model", "messages", "options", "keep_alive"})
 
-    def test_carregamento_cpu_gpu_parcial_e_desconhecido(self):
-        for tamanho, vram, esperado in [(100, 0, "CPU"), (100, 100, "GPU"),
+    def test_loading_cpu_partial_gpu_and_unknown(self):
+        for size, vram, expected in [(100, 0, "CPU"), (100, 100, "GPU"),
                                        (100, 25, "CPU/GPU parcial"), (None, 1, "desconhecido"),
                                        (100, None, "desconhecido"), (100, 101, "desconhecido")]:
             with self.subTest(vram=vram):
-                cliente = Mock(ps=Mock(return_value=SimpleNamespace(models=[
-                    SimpleNamespace(model="modelo:latest", size=tamanho, size_vram=vram)])))
-                self.assertEqual(b.usou_gpu("modelo", cliente)["carregamento"], esperado)
+                client = Mock(ps=Mock(return_value=SimpleNamespace(models=[
+                    SimpleNamespace(model="model:latest", size=size, size_vram=vram)])))
+                self.assertEqual(b.gpu_usage("model", client)["carregamento"], expected)
 
-    def test_nome_gpu_nao_faz_correspondencia_aproximada(self):
-        cliente = Mock(ps=Mock(return_value={"models": [{"model": "modelo2:latest", "size": 100, "size_vram": 100}]}))
-        self.assertEqual(b.usou_gpu("modelo", cliente)["carregamento"], "desconhecido")
-        cliente.ps.return_value["models"][0]["model"] = "modelo"
-        self.assertEqual(b.usou_gpu("modelo:latest", cliente)["carregamento"], "GPU")
-        self.assertEqual(b.usou_gpu("modelo:q4", cliente)["carregamento"], "desconhecido")
-        self.assertEqual(b.nome_canonico("localhost:5000/modelo"), "localhost:5000/modelo:latest")
+    def test_gpu_name_has_no_fuzzy_matching(self):
+        client = Mock(ps=Mock(return_value={"models": [{"model": "model2:latest", "size": 100, "size_vram": 100}]}))
+        self.assertEqual(b.gpu_usage("model", client)["carregamento"], "desconhecido")
+        client.ps.return_value["models"][0]["model"] = "model"
+        self.assertEqual(b.gpu_usage("model:latest", client)["carregamento"], "GPU")
+        self.assertEqual(b.gpu_usage("model:q4", client)["carregamento"], "desconhecido")
+        self.assertEqual(b.canonical_name("localhost:5000/model"), "localhost:5000/model:latest")
 
-    def test_consulta_gpu_indisponivel_preserva_respostas(self):
-        cliente = ClienteSimulado([resposta()] * 3)
-        cliente.ps.side_effect = RuntimeError("Consulta indisponível")
-        self.rodar(cliente)
-        resultados = json.loads(self.progresso().read_text())["resultados"]
-        self.assertEqual([r["letra"] for r in resultados], ["C"] * 3)
-        self.assertTrue(all(r["carregamento"] == "desconhecido" for r in resultados))
-        self.assertTrue(all(r["erro"] is None for r in resultados))
-        self.assertIn("Consulta indisponível", resultados[0]["erro_consulta_gpu"])
+    def test_unavailable_gpu_query_preserves_answers(self):
+        client = FakeClient([response()] * 3)
+        client.ps.side_effect = RuntimeError("Query unavailable")
+        self.run_benchmark(client)
+        results = json.loads(self.progress().read_text())["resultados"]
+        self.assertEqual([r["letra"] for r in results], ["C"] * 3)
+        self.assertTrue(all(r["carregamento"] == "desconhecido" for r in results))
+        self.assertTrue(all(r["erro"] is None for r in results))
+        self.assertIn("Query unavailable", results[0]["erro_consulta_gpu"])
 
-    def test_acuracia_exclui_gabaritos_invalidos_sem_perder_registros(self):
-        gabaritos = ["A", "X", None, "", "F", " c ", "B", "D", "C"]
-        df = pd.DataFrame([questao(numero=str(i), gabarito=g) for i, g in enumerate(gabaritos)])
-        resultados = [registro(numero=str(i), letra="A") for i in range(5)]
-        resultados += [registro(numero="5"), registro(numero="6", letra=None),
-                       registro(numero="7", letra=None, erro="Falhou")]
-        total = b.associar_resultados(df, resultados)
-        r = b.relatorio(total)
-        self.assertEqual(r, {"parcial": True, "total_questoes": 9, "processadas": 8,
-                             "excluidas": 4, "avaliadas": 4, "acertos": 2, "acuracia": .5,
-                             "sem_letra_valida": 2, "falhas_inferencia": 1})
+    def test_accuracy_excludes_invalid_answer_keys_without_losing_records(self):
+        answer_keys = ["A", "X", None, "", "F", " c ", "B", "D", "C"]
+        df = pd.DataFrame([question(number=str(i), answer_key=g) for i, g in enumerate(answer_keys)])
+        results = [record(number=str(i), letter="A") for i in range(5)]
+        results += [record(number="5"), record(number="6", letter=None),
+                       record(number="7", letter=None, error="Failed")]
+        total = b.merge_results(df, results)
+        r = b.build_report(total)
+        self.assertEqual(r, {"partial": True, "total_questions": 9, "processed": 8,
+                             "excluded": 4, "evaluated": 4, "correct": 2, "accuracy": .5,
+                             "no_valid_letter": 2, "inference_failures": 1})
         self.assertEqual(len(total), 9)
         self.assertTrue(pd.isna(total.loc[8, "acertou"]))
         self.assertTrue(pd.isna(total.loc[1, "acertou"]))
         self.assertFalse(total.loc[6, "acertou"])
         self.assertFalse(total.loc[7, "acertou"])
 
-    def test_sem_avaliadas_nao_inventa_acuracia(self):
-        for resultados in [[], [registro()]]:
-            r = b.relatorio(b.associar_resultados(pd.DataFrame([questao(gabarito="X")]), resultados))
-            self.assertIsNone(r["acuracia"])
-            self.assertEqual(r["avaliadas"], 0)
-            self.assertEqual(r["acertos"], 0)
+    def test_no_evaluated_questions_does_not_invent_accuracy(self):
+        for results in [[], [record()]]:
+            r = b.build_report(b.merge_results(pd.DataFrame([question(answer_key="X")]), results))
+            self.assertIsNone(r["accuracy"])
+            self.assertEqual(r["evaluated"], 0)
+            self.assertEqual(r["correct"], 0)
 
-    def test_incremental_interrupcao_e_retomada_sem_repetir_erros(self):
-        cliente = ClienteSimulado([resposta(), KeyboardInterrupt()])
+    def test_incremental_interruption_and_resume_without_repeating_errors(self):
+        client = FakeClient([response(), KeyboardInterrupt()])
         with self.assertRaises(KeyboardInterrupt):
-            self.rodar(cliente)
-        estado = json.loads(self.progresso().read_text())
-        self.assertEqual(len(estado["resultados"]), 2)
-        self.assertIn("interrompida", estado["resultados"][1]["erro"])
-        self.assertIsNone(estado["resultados"][0]["tokens_prompt"])
-        self.assertIn("Relatório PARCIAL", self.log.getvalue())
-        self.assertIn("Processadas: 2/3", self.log.getvalue())
-        retomada = ClienteSimulado([resposta()])
-        self.rodar(retomada, retomar=True)
-        self.assertEqual(len(retomada.perguntas), 1)
-        self.assertIn("p3/1", retomada.perguntas[0]["messages"][1]["content"])
-        self.assertEqual(retomada.aquecimentos, 1)
-        self.assertEqual(len(json.loads(self.progresso().read_text())["resultados"]), 3)
-        total = pd.read_csv(b.caminho_saida("modelo", "entrada", self.saida))
+            self.run_benchmark(client)
+        state = json.loads(self.progress().read_text())
+        self.assertEqual(len(state["resultados"]), 2)
+        self.assertIn("interrupted", state["resultados"][1]["erro"])
+        self.assertIsNone(state["resultados"][0]["tokens_prompt"])
+        self.assertIn("PARTIAL report", self.log.getvalue())
+        self.assertIn("Processed: 2/3", self.log.getvalue())
+        resumed = FakeClient([response()])
+        self.run_benchmark(resumed, resume=True)
+        self.assertEqual(len(resumed.asked), 1)
+        self.assertIn("p3/1", resumed.asked[0]["messages"][1]["content"])
+        self.assertEqual(resumed.warmups, 1)
+        self.assertEqual(len(json.loads(self.progress().read_text())["resultados"]), 3)
+        total = pd.read_csv(b.output_path("model", "input", self.output_dir))
         self.assertEqual(total["processada"].tolist(), [True] * 3)
         self.assertEqual(total["acertou"].tolist(), [True, False, True])
-        self.assertIn("Relatório COMPLETO", self.log.getvalue())
+        self.assertIn("COMPLETE report", self.log.getvalue())
 
-    def test_falhas_registradas_nao_sao_reenviadas(self):
-        cliente = ClienteSimulado([RuntimeError("Falha de inferência"), resposta(), resposta()])
-        self.rodar(cliente)
-        nenhum = Mock()
-        self.rodar(nenhum, retomar=True)
-        self.assertEqual(nenhum.mock_calls, [])
-        self.assertIn("Falhas de inferência: 1", self.log.getvalue())
-        self.assertIn("Acertos: 2", self.log.getvalue())
+    def test_recorded_failures_are_not_resent(self):
+        client = FakeClient([RuntimeError("Inference failure"), response(), response()])
+        self.run_benchmark(client)
+        none_client = Mock()
+        self.run_benchmark(none_client, resume=True)
+        self.assertEqual(none_client.mock_calls, [])
+        self.assertIn("Inference failures: 1", self.log.getvalue())
+        self.assertIn("Correct: 2", self.log.getvalue())
 
-    def test_progresso_e_salvo_antes_da_proxima_questao(self):
-        cliente = ClienteSimulado([resposta()] * 3)
-        original = cliente.chat
-        def verificar(**kwargs):
+    def test_progress_is_saved_before_the_next_question(self):
+        client = FakeClient([response()] * 3)
+        original = client.chat
+        def verify(**kwargs):
             if kwargs["messages"][1]["content"] != "Oi":
-                estado = json.loads(self.progresso().read_text())
-                self.assertEqual(len(estado["resultados"]), len(cliente.perguntas))
+                state = json.loads(self.progress().read_text())
+                self.assertEqual(len(state["resultados"]), len(client.asked))
             return original(**kwargs)
-        cliente.chat = verificar
-        self.rodar(cliente)
-        self.assertEqual(len(cliente.perguntas), 3)
-        self.assertEqual(cliente.aquecimentos, 1)
-        cliente.pull.assert_not_called()
+        client.chat = verify
+        self.run_benchmark(client)
+        self.assertEqual(len(client.asked), 3)
+        self.assertEqual(client.warmups, 1)
+        client.pull.assert_not_called()
 
-    def test_ctrl_c_durante_salvamento_preserva_resposta(self):
-        original = b.salvar_progresso
-        interrompeu = False
-        def interromper(caminho, config, resultados):
-            nonlocal interrompeu
-            if resultados and not interrompeu:
-                interrompeu = True
+    def test_ctrl_c_during_save_preserves_answer(self):
+        original = b.save_progress
+        interrupted = False
+        def interrupt(path, config, results):
+            nonlocal interrupted
+            if results and not interrupted:
+                interrupted = True
                 raise KeyboardInterrupt
-            return original(caminho, config, resultados)
-        with patch.object(b, "salvar_progresso", side_effect=interromper):
+            return original(path, config, results)
+        with patch.object(b, "save_progress", side_effect=interrupt):
             with self.assertRaises(KeyboardInterrupt):
-                self.rodar(ClienteSimulado([resposta()]))
-        self.assertEqual(len(json.loads(self.progresso().read_text())["resultados"]), 1)
-        cliente = ClienteSimulado([resposta(), resposta()])
-        self.rodar(cliente, retomar=True)
-        self.assertEqual(len(cliente.perguntas), 2)
+                self.run_benchmark(FakeClient([response()]))
+        self.assertEqual(len(json.loads(self.progress().read_text())["resultados"]), 1)
+        client = FakeClient([response(), response()])
+        self.run_benchmark(client, resume=True)
+        self.assertEqual(len(client.asked), 2)
 
-    def test_ctrl_c_na_consulta_gpu_preserva_resposta_recebida(self):
-        cliente = ClienteSimulado([resposta()])
-        cliente.ps.side_effect = KeyboardInterrupt
+    def test_ctrl_c_during_gpu_query_preserves_received_answer(self):
+        client = FakeClient([response()])
+        client.ps.side_effect = KeyboardInterrupt
         with self.assertRaises(KeyboardInterrupt):
-            self.rodar(cliente)
-        resultado = json.loads(self.progresso().read_text())["resultados"][0]
-        self.assertEqual(resultado["letra"], "C")
-        self.assertIsNone(resultado["erro"])
-        self.assertEqual(resultado["carregamento"], "desconhecido")
+            self.run_benchmark(client)
+        result = json.loads(self.progress().read_text())["resultados"][0]
+        self.assertEqual(result["letra"], "C")
+        self.assertIsNone(result["erro"])
+        self.assertEqual(result["carregamento"], "desconhecido")
 
-    def test_retomada_de_varios_modelos_preserva_combinacoes_concluidas(self):
-        cliente = ClienteSimulado([resposta()] * 3 + [KeyboardInterrupt()])
-        argumentos = dict(modelos=("modelo", "outro"), arquivos=("entrada",),
-                          pasta_csv=self.entrada, pasta_saida=self.saida)
+    def test_resume_with_several_models_preserves_finished_combinations(self):
+        client = FakeClient([response()] * 3 + [KeyboardInterrupt()])
+        arguments = dict(models=("model", "other"), files=("input",),
+                          csv_dir=self.input_dir, output_dir=self.output_dir)
         with self.assertRaises(KeyboardInterrupt):
-            b.rodar_modelo(cliente=cliente, **argumentos)
-        self.assertEqual(cliente.aquecimentos, 2)
-        retomada = ClienteSimulado([resposta(), resposta()])
-        b.rodar_modelo(cliente=retomada, retomar=True, **argumentos)
-        self.assertEqual(retomada.aquecimentos, 1)
-        self.assertEqual([p["model"] for p in retomada.perguntas], ["outro", "outro"])
-        self.assertEqual(len(json.loads(self.progresso().read_text())["resultados"]), 3)
+            b.run_model(client=client, **arguments)
+        self.assertEqual(client.warmups, 2)
+        resumed = FakeClient([response(), response()])
+        b.run_model(client=resumed, resume=True, **arguments)
+        self.assertEqual(resumed.warmups, 1)
+        self.assertEqual([p["model"] for p in resumed.asked], ["other", "other"])
+        self.assertEqual(len(json.loads(self.progress().read_text())["resultados"]), 3)
 
-    def test_recusa_sobrescrita_sem_chamar_ollama(self):
-        self.rodar(ClienteSimulado([resposta()] * 3))
-        anterior = self.progresso().read_bytes()
-        cliente = Mock()
-        with self.assertRaisesRegex(ValueError, "Saída já existe"):
-            self.rodar(cliente)
-        self.assertEqual(cliente.mock_calls, [])
-        self.assertEqual(self.progresso().read_bytes(), anterior)
+    def test_refuses_overwrite_without_calling_ollama(self):
+        self.run_benchmark(FakeClient([response()] * 3))
+        previous = self.progress().read_bytes()
+        client = Mock()
+        with self.assertRaisesRegex(ValueError, "Output already exists"):
+            self.run_benchmark(client)
+        self.assertEqual(client.mock_calls, [])
+        self.assertEqual(self.progress().read_bytes(), previous)
 
-    def test_recusa_retomada_sem_progresso(self):
-        with self.assertRaisesRegex(ValueError, "Progresso ausente"):
-            self.rodar(Mock(), retomar=True)
+    def test_refuses_resume_without_progress(self):
+        with self.assertRaisesRegex(ValueError, "Progress missing"):
+            self.run_benchmark(Mock(), resume=True)
 
-    def test_recusa_retomada_com_configuracao_incompativel(self):
-        self.rodar(ClienteSimulado([resposta()] * 3))
-        original = json.loads(self.progresso().read_text())
-        for campo, valor in [("modelo", "outro"), ("arquivo", "outro"), ("system", "outro"),
-                             ("template", "outro"), ("opcoes", {"temperature": 1}),
-                             ("entrada_sha256", "diferente"), ("raciocinio", "alterado"),
-                             ("keep_alive", "5m"), ("prompts_sha256", "diferente")]:
-            with self.subTest(campo=campo):
-                estado = copy.deepcopy(original)
-                estado["configuracao"][campo] = valor
-                self.progresso().write_text(json.dumps(estado))
-                cliente = Mock()
-                with self.assertRaisesRegex(ValueError, "Retomada incompatível"):
-                    self.rodar(cliente, retomar=True)
-                self.assertEqual(cliente.mock_calls, [])
+    def test_refuses_resume_with_incompatible_config(self):
+        self.run_benchmark(FakeClient([response()] * 3))
+        original = json.loads(self.progress().read_text())
+        for field, value in [("modelo", "other"), ("arquivo", "other"), ("system", "other"),
+                             ("template", "other"), ("opcoes", {"temperature": 1}),
+                             ("entrada_sha256", "different"), ("raciocinio", "changed"),
+                             ("keep_alive", "5m"), ("prompts_sha256", "different")]:
+            with self.subTest(field=field):
+                state = copy.deepcopy(original)
+                state["configuracao"][field] = value
+                self.progress().write_text(json.dumps(state))
+                client = Mock()
+                with self.assertRaisesRegex(ValueError, "Incompatible resume"):
+                    self.run_benchmark(client, resume=True)
+                self.assertEqual(client.mock_calls, [])
 
-    def test_mudanca_real_da_entrada_e_prompt_impede_retomada(self):
-        self.rodar(ClienteSimulado([resposta()] * 3))
-        for campo in ["SYSTEM", "TEMPLATE", "NUM_CTX"]:
-            valor = 1024 if campo == "NUM_CTX" else getattr(b, campo) + " modificado"
-            with self.subTest(campo=campo), patch.object(b, campo, valor):
-                with self.assertRaisesRegex(ValueError, "Retomada incompatível"):
-                    self.rodar(Mock(), retomar=True)
-        self.gravar([questao(gabarito="D"), questao("p2"), questao("p3")])
-        with self.assertRaisesRegex(ValueError, "Retomada incompatível"):
-            self.rodar(Mock(), retomar=True)
+    def test_real_input_and_prompt_changes_prevent_resume(self):
+        self.run_benchmark(FakeClient([response()] * 3))
+        for field in ["SYSTEM", "TEMPLATE", "NUM_CTX"]:
+            value = 1024 if field == "NUM_CTX" else getattr(b, field) + " modified"
+            with self.subTest(field=field), patch.object(b, field, value):
+                with self.assertRaisesRegex(ValueError, "Incompatible resume"):
+                    self.run_benchmark(Mock(), resume=True)
+        self.write_rows([question(answer_key="D"), question("p2"), question("p3")])
+        with self.assertRaisesRegex(ValueError, "Incompatible resume"):
+            self.run_benchmark(Mock(), resume=True)
 
-    def test_retomada_rejeita_chaves_duplicadas(self):
-        self.rodar(ClienteSimulado([resposta()] * 3))
-        estado = json.loads(self.progresso().read_text())
-        estado["resultados"].append(estado["resultados"][0])
-        self.progresso().write_text(json.dumps(estado))
-        with self.assertRaisesRegex(ValueError, "chave duplicada"):
-            self.rodar(Mock(), retomar=True)
+    def test_resume_rejects_duplicate_keys(self):
+        self.run_benchmark(FakeClient([response()] * 3))
+        state = json.loads(self.progress().read_text())
+        state["resultados"].append(state["resultados"][0])
+        self.progress().write_text(json.dumps(state))
+        with self.assertRaisesRegex(ValueError, "duplicate key"):
+            self.run_benchmark(Mock(), resume=True)
 
-    def test_falha_de_escrita_atomica_preserva_progresso(self):
-        self.rodar(ClienteSimulado([resposta()] * 3))
-        antes = self.progresso().read_bytes()
-        def falhar(f):
-            f.write('{"incompleto":')
-            raise OSError("Disco indisponível")
+    def test_atomic_write_failure_preserves_progress(self):
+        self.run_benchmark(FakeClient([response()] * 3))
+        before = self.progress().read_bytes()
+        def fail(f):
+            f.write('{"incomplete":')
+            raise OSError("Disk unavailable")
         with self.assertRaises(OSError):
-            b.salvar_atomico(self.progresso(), falhar)
-        self.assertEqual(self.progresso().read_bytes(), antes)
-        self.assertEqual(len(list(self.saida.iterdir())), 2)
+            b.save_atomic(self.progress(), fail)
+        self.assertEqual(self.progress().read_bytes(), before)
+        self.assertEqual(len(list(self.output_dir.iterdir())), 2)
 
-    def test_recupera_csv_sem_novas_inferencias(self):
-        self.rodar(ClienteSimulado([resposta()] * 3))
-        saida = b.caminho_saida("modelo", "entrada", self.saida)
-        saida.write_text("CSV interrompido")
-        cliente = Mock()
-        self.rodar(cliente, retomar=True)
-        self.assertEqual(cliente.mock_calls, [])
-        self.assertEqual(len(pd.read_csv(saida)), 3)
+    def test_recovers_csv_without_new_inferences(self):
+        self.run_benchmark(FakeClient([response()] * 3))
+        output_dir = b.output_path("model", "input", self.output_dir)
+        output_dir.write_text("Interrupted CSV")
+        client = Mock()
+        self.run_benchmark(client, resume=True)
+        self.assertEqual(client.mock_calls, [])
+        self.assertEqual(len(pd.read_csv(output_dir)), 3)
 
-    def test_aquecimento_nao_conta_como_questao(self):
-        cliente = Mock(chat=Mock(side_effect=RuntimeError("Servidor indisponível")))
-        with self.assertRaisesRegex(RuntimeError, "aquecimento"):
-            self.rodar(cliente)
-        self.assertEqual(json.loads(self.progresso().read_text())["resultados"], [])
-        self.assertIn("Processadas: 0/3", self.log.getvalue())
-        self.assertIn("Falhas de inferência: 0", self.log.getvalue())
+    def test_warmup_does_not_count_as_a_question(self):
+        client = Mock(chat=Mock(side_effect=RuntimeError("Server unavailable")))
+        with self.assertRaisesRegex(RuntimeError, "Warmup failed"):
+            self.run_benchmark(client)
+        self.assertEqual(json.loads(self.progress().read_text())["resultados"], [])
+        self.assertIn("Processed: 0/3", self.log.getvalue())
+        self.assertIn("Inference failures: 0", self.log.getvalue())
 
-    def test_download_apenas_para_modelo_ausente(self):
-        for codigo in [404, 500]:
-            cliente = Mock(show=Mock(side_effect=ollama.ResponseError("erro", status_code=codigo)))
-            if codigo == 404:
-                b.garantir_modelo("modelo", cliente)
-                cliente.pull.assert_called_once_with("modelo")
+    def test_download_only_for_missing_model(self):
+        for code in [404, 500]:
+            client = Mock(show=Mock(side_effect=ollama.ResponseError("error", status_code=code)))
+            if code == 404:
+                b.ensure_model("model", client)
+                client.pull.assert_called_once_with("model")
             else:
                 with self.assertRaises(ollama.ResponseError):
-                    b.garantir_modelo("modelo", cliente)
-                cliente.pull.assert_not_called()
+                    b.ensure_model("model", client)
+                client.pull.assert_not_called()
 
-    def test_notebook_sem_saidas_e_com_mesmo_fluxo_simulado(self):
-        notebook = json.loads((b.RAIZ / "notebooks/teste_provas.ipynb").read_text())
-        celulas = [c for c in notebook["cells"] if c["cell_type"] == "code"]
-        for celula in celulas:
-            self.assertEqual(celula["outputs"], [])
-            self.assertIsNone(celula["execution_count"])
-            compile("".join(celula["source"]), "notebook", "exec")
-        # Executar importação e configuração originais; usar fixture e diretório temporários.
-        for cwd in [b.RAIZ, b.RAIZ / "notebooks"]:
-            antigo = Path.cwd()
+    def test_notebook_has_no_outputs_and_same_simulated_flow(self):
+        notebook = json.loads((b.ROOT / "notebooks/teste_provas.ipynb").read_text())
+        cells = [c for c in notebook["cells"] if c["cell_type"] == "code"]
+        for cell in cells:
+            self.assertEqual(cell["outputs"], [])
+            self.assertIsNone(cell["execution_count"])
+            compile("".join(cell["source"]), "notebook", "exec")
+        # Run the original import and configuration cells; use a fixture and temporary directories.
+        for cwd in [b.ROOT, b.ROOT / "notebooks"]:
+            old_cwd = Path.cwd()
             try:
                 os.chdir(cwd)
-                contexto = {}
-                exec("".join(celulas[0]["source"]), contexto)
-                exec("".join(celulas[1]["source"]), contexto)
-                self.assertEqual(contexto["RAIZ"], b.RAIZ)
+                context = {}
+                exec("".join(cells[0]["source"]), context)
+                exec("".join(cells[1]["source"]), context)
+                self.assertEqual(context["ROOT"], b.ROOT)
             finally:
-                os.chdir(antigo)
-        caminho, df = b.carregar_entrada("entrada", self.entrada)
-        contexto.update(arquivo="entrada", modelo="modelo", pasta_saida=self.saida,
-                        caminho=caminho, prova_2015=df)
-        cliente = ClienteSimulado([resposta()] * 3)
-        def rodar_notebook(**kwargs):
-            kwargs["pasta_csv"] = self.entrada
-            return b.rodar_modelo(cliente=cliente, **kwargs)
-        contexto["rodar_modelo"] = rodar_notebook
-        exec("".join(celulas[2]["source"]), contexto)
-        exec("".join(celulas[3]["source"]), contexto)
-        self.assertEqual(b.relatorio(contexto["df_final"])["acertos"], 3)
-        self.assertEqual(len(cliente.perguntas), 3)
+                os.chdir(old_cwd)
+        path, df = b.load_input("input", self.input_dir)
+        context.update(file="input", model="model", output_dir=self.output_dir,
+                        path=path, exam_2015=df)
+        client = FakeClient([response()] * 3)
+        def run_notebook(**kwargs):
+            kwargs["csv_dir"] = self.input_dir
+            return b.run_model(client=client, **kwargs)
+        context["run_model"] = run_notebook
+        exec("".join(cells[2]["source"]), context)
+        exec("".join(cells[3]["source"]), context)
+        self.assertEqual(b.build_report(context["final_df"])["correct"], 3)
+        self.assertEqual(len(client.asked), 3)
 
-    def test_openrouter_nao_baixa_nem_aquece_nem_consulta_ps_e_isola_saida(self):
-        cliente = ClienteSimulado([resposta()] * 3)
-        self.rodar(cliente, openrouter=True)
-        cliente.show.assert_not_called()
-        cliente.pull.assert_not_called()
-        cliente.ps.assert_not_called()
-        self.assertEqual(cliente.aquecimentos, 0)
-        self.assertEqual(len(cliente.perguntas), 3)
-        self.assertNotIn("keep_alive", cliente.perguntas[0])
-        self.assertEqual(cliente.perguntas[0]["options"], {"temperature": 0, "seed": 42})
-        progresso = b.caminho_saida("modelo", "entrada", self.saida, openrouter=True).with_suffix(".progresso.json")
-        estado = json.loads(progresso.read_text())
-        self.assertEqual(estado["configuracao"]["provedor"], "openrouter")
-        self.assertNotIn("keep_alive", estado["configuracao"])
-        self.assertTrue(all(r["carregamento"] == "openrouter" for r in estado["resultados"]))
-        self.assertNotEqual(b.caminho_saida("modelo", "entrada", self.saida),
-                            b.caminho_saida("modelo", "entrada", self.saida, openrouter=True))
-        local = b.configuracao("modelo", "entrada", *b.carregar_entrada("entrada", self.entrada))
+    def test_openrouter_does_not_pull_warm_up_or_query_ps_and_isolates_output(self):
+        client = FakeClient([response()] * 3)
+        self.run_benchmark(client, openrouter=True)
+        client.show.assert_not_called()
+        client.pull.assert_not_called()
+        client.ps.assert_not_called()
+        self.assertEqual(client.warmups, 0)
+        self.assertEqual(len(client.asked), 3)
+        self.assertNotIn("keep_alive", client.asked[0])
+        self.assertEqual(client.asked[0]["options"], {"temperature": 0, "seed": 42})
+        progress = b.output_path("model", "input", self.output_dir, openrouter=True).with_suffix(".progresso.json")
+        state = json.loads(progress.read_text())
+        self.assertEqual(state["configuracao"]["provedor"], "openrouter")
+        self.assertNotIn("keep_alive", state["configuracao"])
+        self.assertTrue(all(r["carregamento"] == "openrouter" for r in state["resultados"]))
+        self.assertNotEqual(b.output_path("model", "input", self.output_dir),
+                            b.output_path("model", "input", self.output_dir, openrouter=True))
+        local = b.build_config("model", "input", *b.load_input("input", self.input_dir))
         self.assertNotIn("provedor", local)
 
-    def test_cliente_openrouter_traduz_resposta_e_erros(self):
+    def test_openrouter_client_translates_response_and_errors(self):
         http = Mock()
         http.post.return_value = Mock(status_code=200, json=Mock(return_value={
             "choices": [{"message": {"content": "Resposta: B"}}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 3}}))
-        cliente = b.ClienteOpenRouter("segredo", http=http, tentativas=1)
-        out = b.perguntar("a/b:free", "q", cliente, openrouter=True)
+        client = b.OpenRouterClient("secret", http=http, attempts=1)
+        out = b.ask("a/b:free", "q", client, openrouter=True)
         self.assertEqual((out["letra"], out["tokens_prompt"], out["tokens_saida"]), ("B", 10, 3))
         self.assertIsNone(out["possivel_truncamento"])
         self.assertGreaterEqual(out["tempo_s"], 0)
-        chamada = http.post.call_args
-        self.assertEqual(chamada.args[0], b.URL_OPENROUTER)
-        self.assertEqual(chamada.kwargs["headers"], {"Authorization": "Bearer segredo"})
-        self.assertEqual(chamada.kwargs["json"]["model"], "a/b:free")
-        self.assertEqual(chamada.kwargs["json"]["seed"], 42)
-        http.post.return_value = Mock(status_code=429, json=Mock(return_value={"error": {"message": "limite"}}))
-        out = b.perguntar("a/b:free", "q", cliente, openrouter=True)
-        self.assertIn("limite", out["erro"])
+        call = http.post.call_args
+        self.assertEqual(call.args[0], b.OPENROUTER_URL)
+        self.assertEqual(call.kwargs["headers"], {"Authorization": "Bearer secret"})
+        self.assertEqual(call.kwargs["json"]["model"], "a/b:free")
+        self.assertEqual(call.kwargs["json"]["seed"], 42)
+        http.post.return_value = Mock(status_code=429, json=Mock(return_value={"error": {"message": "limit"}}))
+        out = b.ask("a/b:free", "q", client, openrouter=True)
+        self.assertIn("limit", out["erro"])
         self.assertIn("429", out["erro"])
         http.post.return_value = Mock(status_code=502, json=Mock(side_effect=ValueError))
-        self.assertIn("502", b.perguntar("a/b:free", "q", cliente, openrouter=True)["erro"])
-        for corpo in ({"choices": []}, {}, {"choices": [{"message": {"content": None}}]}):
-            http.post.return_value = Mock(status_code=200, json=Mock(return_value=corpo))
-            out = b.perguntar("a/b:free", "q", cliente, openrouter=True)
-            self.assertIn("não retornou conteúdo", out["erro"])
+        self.assertIn("502", b.ask("a/b:free", "q", client, openrouter=True)["erro"])
+        for body in ({"choices": []}, {}, {"choices": [{"message": {"content": None}}]}):
+            http.post.return_value = Mock(status_code=200, json=Mock(return_value=body))
+            out = b.ask("a/b:free", "q", client, openrouter=True)
+            self.assertIn("returned no response content", out["erro"])
             self.assertIsNone(out["letra"])
 
-    def test_openrouter_repete_429_com_espera_e_mostra_causa_real(self):
-        def falha(status, **cab):
-            return Mock(status_code=status, headers=cab, json=Mock(return_value={"error": {
+    def test_openrouter_retries_429_with_wait_and_shows_real_cause(self):
+        def failure(status, **headers):
+            return Mock(status_code=status, headers=headers, json=Mock(return_value={"error": {
                 "message": "Provider returned error", "metadata": {"raw": "free-models-per-min"}}}))
         ok = Mock(status_code=200, headers={}, json=Mock(return_value={
             "choices": [{"message": {"content": "Resposta: A"}}]}))
-        http, dormir = Mock(), Mock()
-        http.post.side_effect = [falha(429, **{"Retry-After": "7"}), falha(502), ok]
-        cliente = b.ClienteOpenRouter("k", http=http, tentativas=5, dormir=dormir)
-        self.assertEqual(b.perguntar("m", "q", cliente, openrouter=True)["letra"], "A")
-        self.assertEqual([c.args[0] for c in dormir.call_args_list], [7, 10])
-        http.post.side_effect = [falha(429)] * 2
-        out = b.perguntar("m", "q", b.ClienteOpenRouter("k", http=http, tentativas=2, dormir=dormir), openrouter=True)
+        http, sleep = Mock(), Mock()
+        http.post.side_effect = [failure(429, **{"Retry-After": "7"}), failure(502), ok]
+        client = b.OpenRouterClient("k", http=http, attempts=5, sleep=sleep)
+        self.assertEqual(b.ask("m", "q", client, openrouter=True)["letra"], "A")
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [7, 10])
+        http.post.side_effect = [failure(429)] * 2
+        out = b.ask("m", "q", b.OpenRouterClient("k", http=http, attempts=2, sleep=sleep), openrouter=True)
         self.assertIn("free-models-per-min", out["erro"])
         self.assertIn("429", out["erro"])
         http.post.side_effect = [Mock(status_code=401, headers={}, json=Mock(return_value={"error": {"message": "x"}}))]
-        b.perguntar("m", "q", b.ClienteOpenRouter("k", http=http, tentativas=5, dormir=dormir), openrouter=True)
-        self.assertEqual(http.post.call_count, 6)  # 3 + 2 + 1: o 401 não é repetido
+        b.ask("m", "q", b.OpenRouterClient("k", http=http, attempts=5, sleep=sleep), openrouter=True)
+        self.assertEqual(http.post.call_count, 6)  # 3 + 2 + 1: the 401 is not retried
 
-    def test_openrouter_retry_after_acima_do_teto_falha_sem_repetir_antes_do_prazo(self):
-        http, dormir = Mock(), Mock()
+    def test_openrouter_retry_after_above_cap_fails_without_retrying_early(self):
+        http, sleep = Mock(), Mock()
         http.post.side_effect = [Mock(status_code=429, headers={"Retry-After": "301"},
-                                      json=Mock(return_value={"error": {"message": "limite"}}))]
-        out = b.perguntar("m", "q", b.ClienteOpenRouter("k", http=http, tentativas=5, dormir=dormir), openrouter=True)
+                                      json=Mock(return_value={"error": {"message": "limit"}}))]
+        out = b.ask("m", "q", b.OpenRouterClient("k", http=http, attempts=5, sleep=sleep), openrouter=True)
         self.assertEqual(http.post.call_count, 1)
-        dormir.assert_not_called()
+        sleep.assert_not_called()
         self.assertIn("429", out["erro"])
-        self.assertIn("excede o teto de 300s", out["erro"])
+        self.assertIn("exceeds the 300s cap", out["erro"])
         ok = Mock(status_code=200, headers={}, json=Mock(return_value={"choices": [{"message": {"content": "Resposta: D"}}]}))
         http.post.side_effect = [Mock(status_code=429, headers={"Retry-After": "300"}, json=Mock(return_value={})), ok]
-        out = b.perguntar("m", "q", b.ClienteOpenRouter("k", http=http, tentativas=5, dormir=dormir), openrouter=True)
+        out = b.ask("m", "q", b.OpenRouterClient("k", http=http, attempts=5, sleep=sleep), openrouter=True)
         self.assertEqual(out["letra"], "D")
-        dormir.assert_called_once_with(300.0)
+        sleep.assert_called_once_with(300.0)
 
-    def test_refazer_erros_reprocessa_resposta_sem_conteudo_do_openrouter(self):
+    def test_redo_errors_reprocesses_openrouter_response_without_content(self):
         http = Mock()
         http.post.return_value = Mock(status_code=200, headers={}, json=Mock(return_value={"choices": []}))
-        self.rodar(b.ClienteOpenRouter("k", http=http, tentativas=1), openrouter=True)
-        cliente = ClienteSimulado([resposta(), resposta(), resposta()])
-        self.rodar(cliente, openrouter=True, retomar=True, refazer_erros=True)
-        self.assertEqual(len(cliente.perguntas), 3)
-        progresso = b.caminho_saida("modelo", "entrada", self.saida, openrouter=True).with_suffix(".progresso.json")
-        self.assertTrue(all(r["erro"] is None for r in json.loads(progresso.read_text())["resultados"]))
+        self.run_benchmark(b.OpenRouterClient("k", http=http, attempts=1), openrouter=True)
+        client = FakeClient([response(), response(), response()])
+        self.run_benchmark(client, openrouter=True, resume=True, redo_errors=True)
+        self.assertEqual(len(client.asked), 3)
+        progress = b.output_path("model", "input", self.output_dir, openrouter=True).with_suffix(".progresso.json")
+        self.assertTrue(all(r["erro"] is None for r in json.loads(progress.read_text())["resultados"]))
 
-    def test_refazer_erros_reprocessa_so_as_falhas(self):
-        self.rodar(ClienteSimulado([resposta(), RuntimeError("429"), resposta()]), openrouter=True)
-        cliente = ClienteSimulado([resposta("Resposta: B")])
+    def test_redo_errors_reprocesses_only_failures(self):
+        self.run_benchmark(FakeClient([response(), RuntimeError("429"), response()]), openrouter=True)
+        client = FakeClient([response("Resposta: B")])
         with self.assertRaises(ValueError):
-            self.rodar(cliente, openrouter=True, refazer_erros=True)
-        self.rodar(cliente, openrouter=True, retomar=True, refazer_erros=True)
-        self.assertEqual(len(cliente.perguntas), 1)
-        progresso = b.caminho_saida("modelo", "entrada", self.saida, openrouter=True).with_suffix(".progresso.json")
-        resultados = json.loads(progresso.read_text())["resultados"]
-        self.assertEqual(len(resultados), 3)
-        self.assertTrue(all(r["erro"] is None for r in resultados))
-        self.assertEqual(sorted(r["letra"] for r in resultados), ["B", "C", "C"])
+            self.run_benchmark(client, openrouter=True, redo_errors=True)
+        self.run_benchmark(client, openrouter=True, resume=True, redo_errors=True)
+        self.assertEqual(len(client.asked), 1)
+        progress = b.output_path("model", "input", self.output_dir, openrouter=True).with_suffix(".progresso.json")
+        results = json.loads(progress.read_text())["resultados"]
+        self.assertEqual(len(results), 3)
+        self.assertTrue(all(r["erro"] is None for r in results))
+        self.assertEqual(sorted(r["letra"] for r in results), ["B", "C", "C"])
 
-    def test_cliente_openrouter_exige_chave_e_le_env_com_prioridade_do_ambiente(self):
+    def test_openrouter_client_requires_key_and_reads_env_with_environment_priority(self):
         with self.assertRaises(RuntimeError):
-            b.criar_cliente_openrouter(ambiente={})
-        self.assertEqual(b.criar_cliente_openrouter(ambiente={"OPENROUTER_API_KEY": " x "}).chave, "x")
-        self.assertTrue(b.criar_parser().parse_args(["--openrouter"]).openrouter)
-        arquivo = Path(self.tmp.name) / ".env"
-        arquivo.write_text('OPENROUTER_API_KEY="do_env"\n')
-        with patch.object(b, "ARQUIVO_ENV", arquivo), patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(b.criar_cliente_openrouter().chave, "do_env")
-            with patch.dict(os.environ, {"OPENROUTER_API_KEY": "do_shell"}):
-                self.assertEqual(b.criar_cliente_openrouter().chave, "do_shell")
-            arquivo.write_text("")
+            b.create_openrouter_client(environment={})
+        self.assertEqual(b.create_openrouter_client(environment={"OPENROUTER_API_KEY": " x "}).key, "x")
+        self.assertTrue(b.create_parser().parse_args(["--openrouter"]).openrouter)
+        file = Path(self.tmp.name) / ".env"
+        file.write_text('OPENROUTER_API_KEY="from_env"\n')
+        with patch.object(b, "ENV_FILE", file), patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(b.create_openrouter_client().key, "from_env")
+            with patch.dict(os.environ, {"OPENROUTER_API_KEY": "from_shell"}):
+                self.assertEqual(b.create_openrouter_client().key, "from_shell")
+            file.write_text("")
             with self.assertRaises(RuntimeError):
-                b.criar_cliente_openrouter()
+                b.create_openrouter_client()
 
 
 if __name__ == "__main__":

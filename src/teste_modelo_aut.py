@@ -1,4 +1,10 @@
-"""Benchmark local, sequencial, com uma chamada por questão e retomada explícita."""
+"""Sequential benchmark with one call per question and explicit resume support.
+
+The persisted data schema (dataset columns, result fields, progress-JSON keys and
+output file names) is kept in Portuguese on purpose, so existing results stay
+readable and resumable. The prompts are also in Portuguese because the exam
+questions are.
+"""
 
 import argparse
 import hashlib
@@ -16,6 +22,7 @@ import pandas as pd
 from dotenv import dotenv_values
 
 
+# Prompts stay in Portuguese: the exam questions are Brazilian law questions.
 SYSTEM = (
     """Você é um especialista em Direito brasileiro resolvendo questões de 
     múltipla escolha de provas. Considere a legislação e a 
@@ -31,533 +38,534 @@ Responda apenas com a letra da alternativa correta, exatamente neste formato:
 Resposta: <letra>"""
 
 NUM_CTX = 4096
-MODELOS = ("gemma4:e4b-it-q4_K_M", "gemma4:e4b-it-q8_0")
-ARQUIVOS = ("provas_tjdft_com_gabarito",)
-RAIZ = Path(__file__).resolve().parent.parent
-PASTA_CSV = RAIZ / "data" / "processed"
-PASTA_SAIDA = RAIZ / "resultados"
-URL_OPENROUTER = "https://openrouter.ai/api/v1/chat/completions"
-VARIAVEL_CHAVE_OPENROUTER = "OPENROUTER_API_KEY"
-TIMEOUT_OPENROUTER_S = 300
-STATUS_REPETIVEIS = (429, 500, 502, 503, 504)
-TENTATIVAS_PADRAO = 5
-ESPERA_BASE_S = 5
-ESPERA_MAXIMA_S = 300  # teto para Retry-After; acima disso a tentativa falha
-ARQUIVO_ENV = RAIZ / ".env"
-CHAVES = ["id_prova", "Nquestao"]
-CAMPOS_RESULTADO = [
-    "modelo", "arquivo", *CHAVES, "carregamento", "erro_consulta_gpu",
+MODELS = ("gemma4:e4b-it-q4_K_M", "gemma4:e4b-it-q8_0")
+FILES = ("provas_tjdft_com_gabarito",)
+ROOT = Path(__file__).resolve().parent.parent
+CSV_DIR = ROOT / "data" / "processed"
+OUTPUT_DIR = ROOT / "resultados"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_KEY_VAR = "OPENROUTER_API_KEY"
+OPENROUTER_TIMEOUT_S = 300
+RETRYABLE_STATUS = (429, 500, 502, 503, 504)
+DEFAULT_ATTEMPTS = 5
+BASE_WAIT_S = 5
+MAX_WAIT_S = 300  # cap for Retry-After; above it the attempt fails
+ENV_FILE = ROOT / ".env"
+KEYS = ["id_prova", "Nquestao"]
+RESULT_FIELDS = [
+    "modelo", "arquivo", *KEYS, "carregamento", "erro_consulta_gpu",
     "resposta_bruta", "letra", "tempo_s", "tokens_prompt", "tokens_saida",
     "possivel_truncamento", "erro",
 ]
 
 
-def log(mensagem):
-    """Registro de andamento com horário; flush para aparecer mesmo com saída redirecionada."""
-    print(f"[{time.strftime('%H:%M:%S')}] {mensagem}", flush=True)
+def log(message):
+    """Progress log with a timestamp; flushes so it shows up even when output is redirected."""
+    print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
 
 
-def opcoes(openrouter=False):
-    # num_ctx é um parâmetro do Ollama local; o OpenRouter usa o contexto do próprio modelo.
+def options(openrouter=False):
+    # num_ctx is a local Ollama parameter; OpenRouter uses the model's own context.
     base = {"temperature": 0, "seed": 42}
     return base if openrouter else {**base, "num_ctx": NUM_CTX}
 
 
-def montar_prompt(row, letras="ABCDE"):
-    alts = "\n".join(f"{l}) {row[l]}" for l in letras if pd.notna(row.get(l)))
+def build_prompt(row, letters="ABCDE"):
+    alts = "\n".join(f"{l}) {row[l]}" for l in letters if pd.notna(row.get(l)))
     return TEMPLATE.format(enunciado=row["enunciado"], alternativas=alts)
 
 
-def extrair_letra(texto):
-    """Aceita declarações completas; conflitos ou construções incertas são inválidos."""
-    if not isinstance(texto, str):
+def extract_letter(text):
+    """Accepts complete statements; conflicts or uncertain constructions are invalid."""
+    if not isinstance(text, str):
         return None
-    # Retirar somente delimitadores Markdown permite **Resposta:** **(C)**.
-    texto = re.sub(r"[*_`]", "", texto)
-    declaracoes = [linha for linha in texto.splitlines() if linha.strip()]
-    if not declaracoes:
+    # Stripping only Markdown delimiters allows **Resposta:** **(C)**.
+    text = re.sub(r"[*_`]", "", text)
+    statements = [line for line in text.splitlines() if line.strip()]
+    if not statements:
         return None
-    letras = set()
-    for declaracao in declaracoes:
-        resposta = re.fullmatch(
+    letters = set()
+    for statement in statements:
+        answer = re.fullmatch(
             r"\s*Resposta\s*:\s*(?:([A-E])|\(\s*([A-E])\s*\))\s*[.!]?\s*",
-            declaracao, flags=re.I,
+            statement, flags=re.I,
         )
-        if not resposta:
+        if not answer:
             return None
-        letras.add((resposta[1] or resposta[2]).upper())
-    return letras.pop() if len(letras) == 1 else None
+        letters.add((answer[1] or answer[2]).upper())
+    return letters.pop() if len(letters) == 1 else None
 
 
-def campo(objeto, nome):
-    return objeto.get(nome) if isinstance(objeto, Mapping) else getattr(objeto, nome, None)
+def get_field(obj, name):
+    return obj.get(name) if isinstance(obj, Mapping) else getattr(obj, name, None)
 
 
-def numero_conhecido(valor):
-    return isinstance(valor, (int, float)) and not isinstance(valor, bool) and math.isfinite(valor) and valor >= 0
+def is_known_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
 
 
-def nome_canonico(modelo):
-    # A porta de um registry não é a tag; somente o último segmento importa.
-    return modelo if ":" in modelo.rsplit("/", 1)[-1] else f"{modelo}:latest"
+def canonical_name(model):
+    # A registry port is not a tag; only the last path segment matters.
+    return model if ":" in model.rsplit("/", 1)[-1] else f"{model}:latest"
 
 
-def usou_gpu(modelo, cliente):
-    """Estado de carregamento em memória, não utilização computacional da GPU."""
+def gpu_usage(model, client):
+    """Memory loading state, not GPU compute utilization."""
     try:
-        modelos = campo(cliente.ps(), "models") or []
-        encontrados = [
-            m for m in modelos
-            if isinstance(campo(m, "model") or campo(m, "name"), str)
-            and nome_canonico(campo(m, "model") or campo(m, "name")) == nome_canonico(modelo)
+        models = get_field(client.ps(), "models") or []
+        found = [
+            m for m in models
+            if isinstance(get_field(m, "model") or get_field(m, "name"), str)
+            and canonical_name(get_field(m, "model") or get_field(m, "name")) == canonical_name(model)
         ]
-        if len(encontrados) != 1:
-            return {"carregamento": "desconhecido", "erro_consulta_gpu": "Modelo não identificado unicamente em ollama.ps()."}
-        tamanho = campo(encontrados[0], "size")
-        vram = campo(encontrados[0], "size_vram")
-        if not numero_conhecido(tamanho) or tamanho == 0 or not numero_conhecido(vram) or vram > tamanho:
-            estado = "desconhecido"
+        if len(found) != 1:
+            return {"carregamento": "desconhecido", "erro_consulta_gpu": "Model not uniquely identified in ollama.ps()."}
+        size = get_field(found[0], "size")
+        vram = get_field(found[0], "size_vram")
+        if not is_known_number(size) or size == 0 or not is_known_number(vram) or vram > size:
+            state = "desconhecido"
         elif vram == 0:
-            estado = "CPU"
-        elif vram < tamanho:
-            estado = "CPU/GPU parcial"
+            state = "CPU"
+        elif vram < size:
+            state = "CPU/GPU parcial"
         else:
-            estado = "GPU"
-        return {"carregamento": estado, "erro_consulta_gpu": None}
+            state = "GPU"
+        return {"carregamento": state, "erro_consulta_gpu": None}
     except Exception as exc:
         return {"carregamento": "desconhecido", "erro_consulta_gpu": str(exc)}
 
 
-def resultado_erro(erro):
+def error_result(error):
     return {
         "resposta_bruta": None, "letra": None, "tempo_s": None,
         "tokens_prompt": None, "tokens_saida": None,
-        "possivel_truncamento": None, "erro": erro,
+        "possivel_truncamento": None, "erro": error,
     }
 
 
-def perguntar(modelo, prompt, cliente, openrouter=False):
+def ask(model, prompt, client, openrouter=False):
     try:
         extras = {} if openrouter else {"keep_alive": "30m"}
-        r = cliente.chat(
-            model=modelo,
+        r = client.chat(
+            model=model,
             messages=[
                 {"role": "system", "content": SYSTEM},
                 {"role": "user", "content": prompt},
             ],
-            options=opcoes(openrouter),
+            options=options(openrouter),
             **extras,
         )
-        texto = campo(campo(r, "message"), "content")
-        duracao = campo(r, "total_duration")
-        tokens_prompt = campo(r, "prompt_eval_count")
-        tokens_saida = campo(r, "eval_count")
+        text = get_field(get_field(r, "message"), "content")
+        duration = get_field(r, "total_duration")
+        tokens_prompt = get_field(r, "prompt_eval_count")
+        tokens_output = get_field(r, "eval_count")
         return {
-            "resposta_bruta": texto if isinstance(texto, str) else None,
-            "letra": extrair_letra(texto),
-            "tempo_s": duracao / 1e9 if numero_conhecido(duracao) else None,
-            "tokens_prompt": tokens_prompt if numero_conhecido(tokens_prompt) else None,
-            "tokens_saida": tokens_saida if numero_conhecido(tokens_saida) else None,
-            # Heurística de proximidade ao limite, não evidência de truncamento.
+            "resposta_bruta": text if isinstance(text, str) else None,
+            "letra": extract_letter(text),
+            "tempo_s": duration / 1e9 if is_known_number(duration) else None,
+            "tokens_prompt": tokens_prompt if is_known_number(tokens_prompt) else None,
+            "tokens_saida": tokens_output if is_known_number(tokens_output) else None,
+            # Heuristic for closeness to the limit, not evidence of truncation.
             "possivel_truncamento": (
-                tokens_prompt >= NUM_CTX - 50 if numero_conhecido(tokens_prompt) and not openrouter else None),
+                tokens_prompt >= NUM_CTX - 50 if is_known_number(tokens_prompt) and not openrouter else None),
             "erro": None,
         }
     except Exception as exc:
-        return resultado_erro(str(exc) or type(exc).__name__)
+        return error_result(str(exc) or type(exc).__name__)
 
 
-def garantir_modelo(modelo, cliente):
-    """Baixa apenas modelos ausentes; falhas de servidor não justificam download."""
+def ensure_model(model, client):
+    """Pulls only missing models; server failures do not justify a download."""
     try:
-        cliente.show(modelo)
+        client.show(model)
     except Exception as exc:
         if getattr(exc, "status_code", None) != 404:
             raise
-        log(f"Modelo '{modelo}' não encontrado. Baixando...")
-        cliente.pull(modelo)
-        log(f"Download de '{modelo}' concluído.")
+        log(f"Model '{model}' not found. Pulling...")
+        client.pull(model)
+        log(f"Download of '{model}' finished.")
 
 
-def carregar_entrada(arquivo, pasta_csv=PASTA_CSV):
-    if not arquivo or Path(arquivo).name != arquivo or "\\" in arquivo:
-        raise ValueError(f"Nome de entrada inválido: {arquivo!r}. Use o nome sem caminho e sem .csv.")
-    caminho = Path(pasta_csv) / f"{arquivo}.csv"
+def load_input(file, csv_dir=CSV_DIR):
+    if not file or Path(file).name != file or "\\" in file:
+        raise ValueError(f"Invalid input name: {file!r}. Use the name without path and without .csv.")
+    path = Path(csv_dir) / f"{file}.csv"
     try:
-        df = pd.read_csv(caminho, dtype={chave: str for chave in [*CHAVES, "enunciado"]})
+        df = pd.read_csv(path, dtype={key: str for key in [*KEYS, "enunciado"]})
     except (OSError, ValueError, pd.errors.ParserError) as exc:
-        raise ValueError(f"Não foi possível ler a entrada {caminho}: {exc}") from exc
-    necessarias = {*CHAVES, "enunciado", "gabarito", *"ABCDE"}
-    faltantes = necessarias - set(df.columns)
-    if faltantes:
-        raise ValueError(f"{caminho}: colunas obrigatórias ausentes: {', '.join(sorted(faltantes))}.")
-    reservadas = (set(CAMPOS_RESULTADO) - set(CHAVES)) | {"processada", "avaliavel", "acertou"}
-    if reservadas & set(df.columns):
-        raise ValueError(f"{caminho}: entrada contém colunas reservadas de resultados.")
+        raise ValueError(f"Could not read input {path}: {exc}") from exc
+    required = {*KEYS, "enunciado", "gabarito", *"ABCDE"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"{path}: missing required columns: {', '.join(sorted(missing))}.")
+    reserved = (set(RESULT_FIELDS) - set(KEYS)) | {"processada", "avaliavel", "acertou"}
+    if reserved & set(df.columns):
+        raise ValueError(f"{path}: input contains reserved result columns.")
     if df.empty:
-        raise ValueError(f"{caminho}: nenhuma questão encontrada.")
-    for coluna in [*CHAVES, "enunciado"]:
-        if df[coluna].isna().any() or df[coluna].str.strip().eq("").any():
-            raise ValueError(f"{caminho}: valores ausentes em {coluna}.")
-    for chave in CHAVES:
-        df[chave] = df[chave].str.strip()
-    if df.duplicated(CHAVES).any():
-        raise ValueError(f"{caminho}: chaves duplicadas em {CHAVES}.")
-    return caminho, df
+        raise ValueError(f"{path}: no questions found.")
+    for column in [*KEYS, "enunciado"]:
+        if df[column].isna().any() or df[column].str.strip().eq("").any():
+            raise ValueError(f"{path}: missing values in {column}.")
+    for key in KEYS:
+        df[key] = df[key].str.strip()
+    if df.duplicated(KEYS).any():
+        raise ValueError(f"{path}: duplicate keys in {KEYS}.")
+    return path, df
 
 
-def associar_resultados(df, resultados):
-    respostas = pd.DataFrame(resultados, columns=CAMPOS_RESULTADO)
-    respostas["processada"] = True
-    total = df.merge(respostas, on=["id_prova", "Nquestao"], how="left", validate="one_to_one")
+def merge_results(df, results):
+    answers = pd.DataFrame(results, columns=RESULT_FIELDS)
+    answers["processada"] = True
+    total = df.merge(answers, on=["id_prova", "Nquestao"], how="left", validate="one_to_one")
     total["processada"] = total["processada"].eq(True)
-    gabarito = total["gabarito"].astype("string").str.strip().str.upper()
-    total["avaliavel"] = gabarito.isin(list("ABCDE"))
-    avaliadas = total["processada"] & total["avaliavel"]
+    answer_key = total["gabarito"].astype("string").str.strip().str.upper()
+    total["avaliavel"] = answer_key.isin(list("ABCDE"))
+    evaluated = total["processada"] & total["avaliavel"]
     total["acertou"] = pd.Series(pd.NA, index=total.index, dtype="boolean")
-    total.loc[avaliadas, "acertou"] = (
-        total.loc[avaliadas, "letra"].eq(gabarito[avaliadas]).fillna(False)
-        & total.loc[avaliadas, "erro"].isna()
+    total.loc[evaluated, "acertou"] = (
+        total.loc[evaluated, "letra"].eq(answer_key[evaluated]).fillna(False)
+        & total.loc[evaluated, "erro"].isna()
     )
     return total
 
 
-def relatorio(total):
-    processadas = total["processada"]
-    avaliadas = processadas & total["avaliavel"]
-    n = int(avaliadas.sum())
-    acertos = int(total.loc[avaliadas, "acertou"].sum())
+def build_report(total):
+    processed = total["processada"]
+    evaluated = processed & total["avaliavel"]
+    n = int(evaluated.sum())
+    correct = int(total.loc[evaluated, "acertou"].sum())
     return {
-        "parcial": int(processadas.sum()) < len(total),
-        "total_questoes": len(total),
-        "processadas": int(processadas.sum()),
-        "excluidas": int((processadas & ~total["avaliavel"]).sum()),
-        "avaliadas": n,
-        "acertos": acertos,
-        "acuracia": acertos / n if n else None,
-        "sem_letra_valida": int((processadas & ~total["letra"].isin(list("ABCDE"))).sum()),
-        "falhas_inferencia": int((processadas & total["erro"].notna()).sum()),
+        "partial": int(processed.sum()) < len(total),
+        "total_questions": len(total),
+        "processed": int(processed.sum()),
+        "excluded": int((processed & ~total["avaliavel"]).sum()),
+        "evaluated": n,
+        "correct": correct,
+        "accuracy": correct / n if n else None,
+        "no_valid_letter": int((processed & ~total["letra"].isin(list("ABCDE"))).sum()),
+        "inference_failures": int((processed & total["erro"].notna()).sum()),
     }
 
 
-def imprimir_relatorio(total, modelo, arquivo):
-    r = relatorio(total)
-    acuracia = f"{r['acuracia']:.2%}" if r["acuracia"] is not None else "não aplicável"
+def print_report(total, model, file):
+    r = build_report(total)
+    accuracy = f"{r['accuracy']:.2%}" if r["accuracy"] is not None else "not applicable"
     print(
-        f"{modelo} | {arquivo} | Relatório {'PARCIAL' if r['parcial'] else 'COMPLETO'} | "
-        f"Processadas: {r['processadas']}/{r['total_questoes']} | "
-        f"Excluídas da avaliação: {r['excluidas']} | Avaliadas: {r['avaliadas']} | "
-        f"Acertos: {r['acertos']} | Acurácia: {acuracia} | "
-        f"Respostas sem letra válida: {r['sem_letra_valida']} | Falhas de inferência: {r['falhas_inferencia']}"
+        f"{model} | {file} | {'PARTIAL' if r['partial'] else 'COMPLETE'} report | "
+        f"Processed: {r['processed']}/{r['total_questions']} | "
+        f"Excluded from evaluation: {r['excluded']} | Evaluated: {r['evaluated']} | "
+        f"Correct: {r['correct']} | Accuracy: {accuracy} | "
+        f"Answers without a valid letter: {r['no_valid_letter']} | Inference failures: {r['inference_failures']}"
     )
 
 
-def detalhe_erro(erro):
-    """O OpenRouter costuma esconder a causa real em error.metadata.raw."""
-    if not isinstance(erro, Mapping):
-        return erro
-    metadata = erro.get("metadata")
-    bruto = metadata.get("raw") if isinstance(metadata, Mapping) else None
-    partes = [p for p in (erro.get("message"), bruto if isinstance(bruto, str) else None) if p]
-    return " | ".join(partes) or None
+def error_detail(error):
+    """OpenRouter often hides the real cause in error.metadata.raw."""
+    if not isinstance(error, Mapping):
+        return error
+    metadata = error.get("metadata")
+    raw = metadata.get("raw") if isinstance(metadata, Mapping) else None
+    parts = [p for p in (error.get("message"), raw if isinstance(raw, str) else None) if p]
+    return " | ".join(parts) or None
 
 
-class ClienteOpenRouter:
-    """Adaptador mínimo: expõe chat() com o formato de resposta que perguntar() já lê.
+class OpenRouterClient:
+    """Minimal adapter: exposes chat() with the response shape that ask() already reads.
 
-    Limites de taxa (429) e falhas transitórias do provedor são repetidos com espera
-    crescente, respeitando Retry-After até `espera_maxima` segundos; se o servidor pedir
-    mais que isso, não há nova tentativa antes do prazo: a requisição falha e a questão
-    fica com erro (refazível com --refazer-erros). `intervalo` espaça o início das requisições.
+    Rate limits (429) and transient provider failures are retried with increasing
+    waits, honoring Retry-After up to `max_wait` seconds; if the server asks for
+    more than that, there is no retry before the deadline: the request fails and the
+    question is recorded with an error (redoable with --redo-errors). `interval`
+    spaces out the start of the requests.
     """
 
-    def __init__(self, chave, http=None, tentativas=TENTATIVAS_PADRAO, intervalo=0, dormir=time.sleep,
-                 espera_maxima=ESPERA_MAXIMA_S):
-        self.chave, self.http = chave, http
-        self.tentativas, self.intervalo, self.dormir = max(1, tentativas), max(0, intervalo), dormir
-        self.espera_maxima = espera_maxima
-        self.ultimo_inicio = None
+    def __init__(self, key, http=None, attempts=DEFAULT_ATTEMPTS, interval=0, sleep=time.sleep,
+                 max_wait=MAX_WAIT_S):
+        self.key, self.http = key, http
+        self.attempts, self.interval, self.sleep = max(1, attempts), max(0, interval), sleep
+        self.max_wait = max_wait
+        self.last_start = None
 
-    def _espera(self, resposta, tentativa):
+    def _wait(self, answer, attempt):
         try:
-            return max(0.0, float(resposta.headers.get("Retry-After")))
+            return max(0.0, float(answer.headers.get("Retry-After")))
         except (AttributeError, TypeError, ValueError):
-            return ESPERA_BASE_S * 2 ** tentativa
+            return BASE_WAIT_S * 2 ** attempt
 
     def chat(self, model, messages, options):
         http = self.http or importlib.import_module("httpx")
-        for tentativa in range(self.tentativas):
-            if self.intervalo and self.ultimo_inicio is not None:
-                falta = self.intervalo - (time.monotonic() - self.ultimo_inicio)
-                if falta > 0:
-                    self.dormir(falta)
-            self.ultimo_inicio = time.monotonic()
-            inicio = time.perf_counter()
+        for attempt in range(self.attempts):
+            if self.interval and self.last_start is not None:
+                remaining = self.interval - (time.monotonic() - self.last_start)
+                if remaining > 0:
+                    self.sleep(remaining)
+            self.last_start = time.monotonic()
+            start = time.perf_counter()
             r = http.post(
-                URL_OPENROUTER, timeout=TIMEOUT_OPENROUTER_S,
-                headers={"Authorization": f"Bearer {self.chave}"},
+                OPENROUTER_URL, timeout=OPENROUTER_TIMEOUT_S,
+                headers={"Authorization": f"Bearer {self.key}"},
                 json={"model": model, "messages": messages, **options},
             )
-            duracao = time.perf_counter() - inicio
+            duration = time.perf_counter() - start
             try:
-                corpo = r.json()
+                body = r.json()
             except ValueError:
-                corpo = {}
-            if not isinstance(corpo, Mapping):
-                corpo = {}
-            erro = corpo.get("error")
-            if r.status_code >= 400 or erro:
-                if r.status_code in STATUS_REPETIVEIS and tentativa + 1 < self.tentativas:
-                    espera = self._espera(r, tentativa)
-                    if espera > self.espera_maxima:
-                        detalhe = detalhe_erro(erro)
+                body = {}
+            if not isinstance(body, Mapping):
+                body = {}
+            error = body.get("error")
+            if r.status_code >= 400 or error:
+                if r.status_code in RETRYABLE_STATUS and attempt + 1 < self.attempts:
+                    wait = self._wait(r, attempt)
+                    if wait > self.max_wait:
+                        detail = error_detail(error)
                         raise RuntimeError(
-                            f"{detalhe or 'Falha na requisição ao OpenRouter'} (status code: {r.status_code}; "
-                            f"Retry-After de {espera:.0f}s excede o teto de {self.espera_maxima:.0f}s)")
-                    log(f"{model}: status {r.status_code}; nova tentativa em {espera:.0f}s "
-                        f"({tentativa + 1}/{self.tentativas - 1})")
-                    self.dormir(espera)
+                            f"{detail or 'OpenRouter request failed'} (status code: {r.status_code}; "
+                            f"Retry-After of {wait:.0f}s exceeds the {self.max_wait:.0f}s cap)")
+                    log(f"{model}: status {r.status_code}; retrying in {wait:.0f}s "
+                        f"({attempt + 1}/{self.attempts - 1})")
+                    self.sleep(wait)
                     continue
-                detalhe = detalhe_erro(erro)
-                raise RuntimeError(f"{detalhe or 'Falha na requisição ao OpenRouter'} (status code: {r.status_code})")
-            escolhas = corpo.get("choices")
-            mensagem = escolhas[0].get("message") if isinstance(escolhas, list) and escolhas and isinstance(escolhas[0], Mapping) else None
-            conteudo = mensagem.get("content") if isinstance(mensagem, Mapping) else None
-            if conteudo is None:
-                # Sem resposta do modelo: registrar como erro para que --refazer-erros a refaça.
-                raise RuntimeError(f"OpenRouter não retornou conteúdo de resposta (status code: {r.status_code})")
-            uso = corpo.get("usage") if isinstance(corpo.get("usage"), Mapping) else {}
+                detail = error_detail(error)
+                raise RuntimeError(f"{detail or 'OpenRouter request failed'} (status code: {r.status_code})")
+            choices = body.get("choices")
+            message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], Mapping) else None
+            content = message.get("content") if isinstance(message, Mapping) else None
+            if content is None:
+                # No model answer: record it as an error so --redo-errors redoes it.
+                raise RuntimeError(f"OpenRouter returned no response content (status code: {r.status_code})")
+            usage = body.get("usage") if isinstance(body.get("usage"), Mapping) else {}
             return {
-                "message": {"content": conteudo},
-                "total_duration": duracao * 1e9,
-                "prompt_eval_count": uso.get("prompt_tokens"),
-                "eval_count": uso.get("completion_tokens"),
+                "message": {"content": content},
+                "total_duration": duration * 1e9,
+                "prompt_eval_count": usage.get("prompt_tokens"),
+                "eval_count": usage.get("completion_tokens"),
             }
 
 
-def criar_cliente_openrouter(ambiente=None, intervalo=0, tentativas=TENTATIVAS_PADRAO):
-    """A chave nunca é gravada em resultados.
+def create_openrouter_client(environment=None, interval=0, attempts=DEFAULT_ATTEMPTS):
+    """The key is never written to results.
 
-    Prioridade: variável de ambiente do processo, depois o arquivo .env da raiz.
+    Priority: process environment variable, then the .env file at the repo root.
     """
-    if ambiente is None:
-        ambiente = {**dotenv_values(ARQUIVO_ENV), **os.environ}
-    chave = (ambiente.get(VARIAVEL_CHAVE_OPENROUTER) or "").strip()
-    if not chave:
-        raise RuntimeError(f"Defina {VARIAVEL_CHAVE_OPENROUTER} no ambiente ou no arquivo .env para usar --openrouter "
-                           "(chave em https://openrouter.ai/settings/keys).")
-    return ClienteOpenRouter(chave, tentativas=tentativas, intervalo=intervalo)
+    if environment is None:
+        environment = {**dotenv_values(ENV_FILE), **os.environ}
+    key = (environment.get(OPENROUTER_KEY_VAR) or "").strip()
+    if not key:
+        raise RuntimeError(f"Set {OPENROUTER_KEY_VAR} in the environment or in the .env file to use --openrouter "
+                           "(create a key at https://openrouter.ai/settings/keys).")
+    return OpenRouterClient(key, attempts=attempts, interval=interval)
 
 
-def configuracao(modelo, arquivo, caminho, df, openrouter=False):
+def build_config(model, file, path, df, openrouter=False):
     config = {
-        "versao": 1, "modelo": modelo, "arquivo": arquivo,
-        "entrada": str(caminho.resolve()),
-        "entrada_sha256": hashlib.sha256(caminho.read_bytes()).hexdigest(),
-        "system": SYSTEM, "template": TEMPLATE, "opcoes": opcoes(),
+        "versao": 1, "modelo": model, "arquivo": file,
+        "entrada": str(path.resolve()),
+        "entrada_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "system": SYSTEM, "template": TEMPLATE, "opcoes": options(),
         "keep_alive": "30m", "raciocinio": "padrao_do_modelo_sem_override",
         "prompts_sha256": hashlib.sha256(json.dumps(
-            [montar_prompt(row) for _, row in df.iterrows()], ensure_ascii=False,
+            [build_prompt(row) for _, row in df.iterrows()], ensure_ascii=False,
         ).encode()).hexdigest(),
     }
-    if openrouter:  # Só neste modo, para não invalidar progressos locais existentes.
-        config.update(provedor="openrouter", opcoes=opcoes(True))
+    if openrouter:  # Only in this mode, so existing local progress files stay valid.
+        config.update(provedor="openrouter", opcoes=options(True))
         del config["keep_alive"]
     return config
 
 
-def salvar_atomico(caminho, escrever):
-    """Uma interrupção durante a escrita conserva o último arquivo completo."""
-    temporario = None
+def save_atomic(path, write):
+    """An interruption during the write keeps the last complete file."""
+    temp_path = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=caminho.parent, delete=False) as f:
-            temporario = Path(f.name)
-            escrever(f)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=path.parent, delete=False) as f:
+            temp_path = Path(f.name)
+            write(f)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(temporario, caminho)
+        os.replace(temp_path, path)
     finally:
-        if temporario is not None and temporario.exists():
-            temporario.unlink()
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
 
 
-def salvar_progresso(caminho, config, resultados):
-    salvar_atomico(caminho, lambda f: json.dump(
-        {"configuracao": config, "resultados": resultados}, f,
+def save_progress(path, config, results):
+    save_atomic(path, lambda f: json.dump(
+        {"configuracao": config, "resultados": results}, f,
         ensure_ascii=False, indent=2, allow_nan=False,
     ))
 
 
-def carregar_progresso(caminho, config, df):
+def load_progress(path, config, df):
     try:
-        estado = json.loads(caminho.read_text(encoding="utf-8"))
+        state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        raise ValueError(f"Progresso ausente ou ilegível: {caminho}: {exc}") from exc
-    if not isinstance(estado, dict) or estado.get("configuracao") != config:
-        raise ValueError(f"Retomada incompatível em {caminho}: modelo, entrada, prompt ou parâmetros mudaram.")
-    resultados = estado.get("resultados")
-    if not isinstance(resultados, list):
-        raise ValueError(f"Progresso inválido em {caminho}: resultados ausentes.")
-    validas = set(df[CHAVES].itertuples(index=False, name=None))
-    vistas = set()
-    for r in resultados:
-        if not isinstance(r, dict) or set(r) != set(CAMPOS_RESULTADO):
-            raise ValueError(f"Registro inválido em {caminho}.")
-        chave = (r["id_prova"], r["Nquestao"])
-        if chave not in validas or chave in vistas or r["modelo"] != config["modelo"] or r["arquivo"] != config["arquivo"]:
-            raise ValueError(f"Identificação inválida ou chave duplicada no progresso {caminho}.")
-        vistas.add(chave)
-    return resultados
+        raise ValueError(f"Progress missing or unreadable: {path}: {exc}") from exc
+    if not isinstance(state, dict) or state.get("configuracao") != config:
+        raise ValueError(f"Incompatible resume in {path}: model, input, prompt or parameters changed.")
+    results = state.get("resultados")
+    if not isinstance(results, list):
+        raise ValueError(f"Invalid progress in {path}: results missing.")
+    valid = set(df[KEYS].itertuples(index=False, name=None))
+    seen = set()
+    for r in results:
+        if not isinstance(r, dict) or set(r) != set(RESULT_FIELDS):
+            raise ValueError(f"Invalid record in {path}.")
+        key = (r["id_prova"], r["Nquestao"])
+        if key not in valid or key in seen or r["modelo"] != config["modelo"] or r["arquivo"] != config["arquivo"]:
+            raise ValueError(f"Invalid identification or duplicate key in progress {path}.")
+        seen.add(key)
+    return results
 
 
-def caminho_saida(modelo, arquivo, pasta_saida=PASTA_SAIDA, openrouter=False):
-    nome_seguro = re.sub(r"[^\w.-]", "_", modelo) + ("_openrouter" if openrouter else "")
-    return Path(pasta_saida) / f"resultados_{nome_seguro}_{arquivo}.csv"
+def output_path(model, file, output_dir=OUTPUT_DIR, openrouter=False):
+    safe_name = re.sub(r"[^\w.-]", "_", model) + ("_openrouter" if openrouter else "")
+    return Path(output_dir) / f"resultados_{safe_name}_{file}.csv"
 
 
-def rodar_modelo(modelos=MODELOS, arquivos=ARQUIVOS, *, retomar=False,
-                 pasta_csv=PASTA_CSV, pasta_saida=PASTA_SAIDA, cliente=None, openrouter=False,
-                 refazer_erros=False, intervalo=0, tentativas=TENTATIVAS_PADRAO):
-    # Toda entrada e todo progresso são validados antes de qualquer acesso ao Ollama.
-    if not modelos or not arquivos or any(not isinstance(m, str) or not m.strip() for m in modelos):
-        raise ValueError("Informe ao menos um modelo e um arquivo válidos.")
-    if refazer_erros and not retomar:
-        raise ValueError("--refazer-erros só faz sentido junto com --retomar.")
-    log(f"Validando entradas: {', '.join(arquivos)}")
-    entradas = [(arquivo, *carregar_entrada(arquivo, pasta_csv)) for arquivo in arquivos]
-    for arquivo, caminho, df in entradas:
-        log(f"Entrada '{arquivo}' carregada: {len(df)} questões ({caminho})")
-    pasta_saida = Path(pasta_saida)
-    execucoes = []
-    destinos = set()
-    for arquivo, caminho, df in entradas:
-        for modelo in modelos:
-            saida = caminho_saida(modelo, arquivo, pasta_saida, openrouter)
-            progresso = saida.with_suffix(".progresso.json")
-            if saida in destinos:
-                raise ValueError(f"Combinações repetidas ou nomes de saída conflitantes: {saida}.")
-            destinos.add(saida)
-            config = configuracao(modelo, arquivo, caminho, df, openrouter)
-            if retomar:
-                resultados = carregar_progresso(progresso, config, df)
-                if refazer_erros:
-                    # Descarta só as tentativas com erro; as respostas válidas são preservadas.
-                    descartadas = sum(1 for r in resultados if r["erro"])
-                    resultados = [r for r in resultados if not r["erro"]]
-                    log(f"{modelo} | {arquivo}: {descartadas} tentativas com erro serão refeitas")
+def run_model(models=MODELS, files=FILES, *, resume=False,
+                 csv_dir=CSV_DIR, output_dir=OUTPUT_DIR, client=None, openrouter=False,
+                 redo_errors=False, interval=0, attempts=DEFAULT_ATTEMPTS):
+    # All inputs and progress files are validated before any Ollama access.
+    if not models or not files or any(not isinstance(m, str) or not m.strip() for m in models):
+        raise ValueError("Provide at least one valid model and one valid file.")
+    if redo_errors and not resume:
+        raise ValueError("--redo-errors only makes sense together with --resume.")
+    log(f"Validating inputs: {', '.join(files)}")
+    inputs = [(file, *load_input(file, csv_dir)) for file in files]
+    for file, path, df in inputs:
+        log(f"Input '{file}' loaded: {len(df)} questions ({path})")
+    output_dir = Path(output_dir)
+    runs = []
+    destinations = set()
+    for file, path, df in inputs:
+        for model in models:
+            output = output_path(model, file, output_dir, openrouter)
+            progress = output.with_suffix(".progresso.json")
+            if output in destinations:
+                raise ValueError(f"Repeated combinations or conflicting output names: {output}.")
+            destinations.add(output)
+            config = build_config(model, file, path, df, openrouter)
+            if resume:
+                results = load_progress(progress, config, df)
+                if redo_errors:
+                    # Discards only the attempts with errors; valid answers are preserved.
+                    discarded = sum(1 for r in results if r["erro"])
+                    results = [r for r in results if not r["erro"]]
+                    log(f"{model} | {file}: {discarded} attempts with errors will be redone")
             else:
-                if saida.exists() or progresso.exists():
-                    raise ValueError(f"Saída já existe: {saida}. Use --retomar ou uma nova --pasta-saida.")
-                resultados = []
-            modo = f"retomando com {len(resultados)} questões já registradas" if retomar else "nova execução"
-            log(f"{modelo} | {arquivo}: {modo}; saída em {saida}")
-            execucoes.append((modelo, arquivo, df, saida, progresso, config, resultados))
+                if output.exists() or progress.exists():
+                    raise ValueError(f"Output already exists: {output}. Use --resume or a new --output-dir.")
+                results = []
+            mode = f"resuming with {len(results)} questions already recorded" if resume else "new run"
+            log(f"{model} | {file}: {mode}; output at {output}")
+            runs.append((model, file, df, output, progress, config, results))
 
-    if cliente is None and openrouter:
-        log("Carregando cliente OpenRouter")
-        cliente = criar_cliente_openrouter(intervalo=intervalo, tentativas=tentativas)
-    elif cliente is None:
-        log("Carregando cliente Ollama")
+    if client is None and openrouter:
+        log("Loading OpenRouter client")
+        client = create_openrouter_client(interval=interval, attempts=attempts)
+    elif client is None:
+        log("Loading Ollama client")
         try:
-            cliente = importlib.import_module("ollama")
+            client = importlib.import_module("ollama")
         except ImportError as exc:
-            raise RuntimeError("Instale o pacote Python 'ollama' no ambiente antes de executar o benchmark.") from exc
-    pasta_saida.mkdir(parents=True, exist_ok=True)
-    if not retomar:
-        for _, _, _, _, progresso, config, resultados in execucoes:
-            salvar_progresso(progresso, config, resultados)
+            raise RuntimeError("Install the 'ollama' Python package in the environment before running the benchmark.") from exc
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if not resume:
+        for _, _, _, _, progress, config, results in runs:
+            save_progress(progress, config, results)
 
-    for modelo, arquivo, df, saida, progresso, config, resultados in execucoes:
-        registradas = {(r["id_prova"], r["Nquestao"]) for r in resultados}
+    for model, file, df, output, progress, config, results in runs:
+        recorded = {(r["id_prova"], r["Nquestao"]) for r in results}
         try:
-            if len(registradas) < len(df):
+            if len(recorded) < len(df):
                 if openrouter:
-                    # Sem download nem aquecimento: uma chamada extra gastaria a cota do modelo.
-                    log(f"{modelo} | {arquivo}: {len(df) - len(registradas)} questões pendentes")
+                    # No download or warmup: an extra call would spend the model quota.
+                    log(f"{model} | {file}: {len(df) - len(recorded)} questions pending")
                 else:
-                    log(f"{modelo} | {arquivo}: verificando disponibilidade do modelo")
-                    garantir_modelo(modelo, cliente)
-                    log(f"{modelo} | {arquivo}: aquecendo o modelo")
-                    aquecimento = perguntar(modelo, "Oi", cliente)
-                    if aquecimento["erro"]:
-                        raise RuntimeError(f"Falha no aquecimento de {modelo}: {aquecimento['erro']}")
-                    log(f"{modelo} | {arquivo}: aquecimento concluído; {len(df) - len(registradas)} questões pendentes")
+                    log(f"{model} | {file}: checking model availability")
+                    ensure_model(model, client)
+                    log(f"{model} | {file}: warming up the model")
+                    warmup = ask(model, "Oi", client)
+                    if warmup["erro"]:
+                        raise RuntimeError(f"Warmup failed for {model}: {warmup['erro']}")
+                    log(f"{model} | {file}: warmup finished; {len(df) - len(recorded)} questions pending")
                 for _, row in df.iterrows():
-                    chave = (row["id_prova"], row["Nquestao"])
-                    if chave in registradas:
+                    key = (row["id_prova"], row["Nquestao"])
+                    if key in recorded:
                         continue
-                    interrompida = False
+                    interrupted = False
                     try:
-                        out = perguntar(modelo, montar_prompt(row), cliente, openrouter)
+                        out = ask(model, build_prompt(row), client, openrouter)
                     except KeyboardInterrupt:
-                        out = resultado_erro("Inferência interrompida pelo usuário; tentativa registrada sem reenvio automático.")
-                        interrompida = True
+                        out = error_result("Inference interrupted by the user; attempt recorded without automatic resend.")
+                        interrupted = True
                     gpu = {"carregamento": "openrouter" if openrouter else "desconhecido", "erro_consulta_gpu": None}
-                    if not interrompida and not openrouter:
+                    if not interrupted and not openrouter:
                         try:
-                            gpu = usou_gpu(modelo, cliente)
+                            gpu = gpu_usage(model, client)
                         except KeyboardInterrupt:
-                            interrompida = True
-                    resultados.append({"modelo": modelo, "arquivo": arquivo,
-                                       "id_prova": chave[0], "Nquestao": chave[1], **gpu, **out})
+                            interrupted = True
+                    results.append({"modelo": model, "arquivo": file,
+                                       "id_prova": key[0], "Nquestao": key[1], **gpu, **out})
                     try:
-                        salvar_progresso(progresso, config, resultados)
+                        save_progress(progress, config, results)
                     except KeyboardInterrupt:
-                        # Não perder uma resposta já recebida por um Ctrl-C na escrita.
-                        salvar_progresso(progresso, config, resultados)
-                        interrompida = True
-                    registradas.add(chave)
-                    total = associar_resultados(df, resultados)
-                    salvar_atomico(saida, lambda f: total.to_csv(f, index=False))
+                        # Do not lose an answer already received because of a Ctrl-C during the write.
+                        save_progress(progress, config, results)
+                        interrupted = True
+                    recorded.add(key)
+                    total = merge_results(df, results)
+                    save_atomic(output, lambda f: total.to_csv(f, index=False))
                     if out["erro"]:
-                        resumo = f"ERRO: {out['erro']}"
+                        summary = f"ERRO: {out['erro']}"
                     else:
-                        resumo = f"letra={out['letra'] or 'inválida'} gabarito={str(row['gabarito']).strip()}"
+                        summary = f"letter={out['letra'] or 'invalid'} answer_key={str(row['gabarito']).strip()}"
                         if out["tempo_s"] is not None:
-                            resumo += f" tempo={out['tempo_s']:.1f}s"
-                    log(f"{modelo} | {arquivo} [{len(registradas)}/{len(df)}] "
-                        f"id_prova={chave[0]} Nquestao={chave[1]} {resumo}")
-                    if interrompida:
+                            summary += f" tempo={out['tempo_s']:.1f}s"
+                    log(f"{model} | {file} [{len(recorded)}/{len(df)}] "
+                        f"id_prova={key[0]} Nquestao={key[1]} {summary}")
+                    if interrupted:
                         raise KeyboardInterrupt
         finally:
-            # O JSON é a fonte da retomada; o CSV pode ser reconstruído sem inferência.
-            log(f"{modelo} | {arquivo}: gravando CSV final e relatório")
-            total = associar_resultados(df, resultados)
-            salvar_atomico(saida, lambda f: total.to_csv(f, index=False))
-            imprimir_relatorio(total, modelo, arquivo)
+            # The JSON is the source for resuming; the CSV can be rebuilt without inference.
+            log(f"{model} | {file}: writing final CSV and report")
+            total = merge_results(df, results)
+            save_atomic(output, lambda f: total.to_csv(f, index=False))
+            print_report(total, model, file)
 
 
-def criar_parser():
+def create_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--modelos", nargs="+", default=list(MODELOS))
-    parser.add_argument("--arquivos", nargs="+", default=list(ARQUIVOS))
-    parser.add_argument("--retomar", action="store_true", help="Reutiliza o progresso compatível, inclusive tentativas com erro.")
-    parser.add_argument("--pasta-saida", type=Path, default=PASTA_SAIDA,
-                        help="Use uma pasta nova para iniciar outra execução sem sobrescrever resultados.")
-    parser.add_argument("--refazer-erros", action="store_true",
-                        help="Com --retomar, descarta as tentativas com erro (ex.: 429) e as refaz; mantém as respostas válidas.")
-    parser.add_argument("--intervalo", type=float, default=0,
-                        help="Segundos mínimos entre requisições no --openrouter (ex.: 3 para ~20 req/min).")
-    parser.add_argument("--tentativas", type=int, default=TENTATIVAS_PADRAO,
-                        help="Tentativas por questão no --openrouter para 429/5xx, com espera crescente.")
+    parser.add_argument("--models", nargs="+", default=list(MODELS))
+    parser.add_argument("--files", nargs="+", default=list(FILES))
+    parser.add_argument("--resume", action="store_true", help="Reuses compatible progress, including attempts with errors.")
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR,
+                        help="Use a new directory to start another run without overwriting results.")
+    parser.add_argument("--redo-errors", action="store_true",
+                        help="With --resume, discards attempts with errors (e.g. 429) and redoes them; keeps valid answers.")
+    parser.add_argument("--interval", type=float, default=0,
+                        help="Minimum seconds between requests with --openrouter (e.g. 3 for ~20 req/min).")
+    parser.add_argument("--attempts", type=int, default=DEFAULT_ATTEMPTS,
+                        help="Attempts per question with --openrouter for 429/5xx, with increasing waits.")
     parser.add_argument("--openrouter", action="store_true",
-                        help=f"Usa o OpenRouter com a chave em ${VARIAVEL_CHAVE_OPENROUTER} (ambiente ou .env); "
-                             "use ids do OpenRouter em --modelos (ex.: provedor/modelo:free).")
+                        help=f"Uses OpenRouter with the key in ${OPENROUTER_KEY_VAR} (environment or .env); "
+                             "use OpenRouter ids in --models (e.g. provider/model:free).")
     return parser
 
 
 def main():
-    parser = criar_parser()
+    parser = create_parser()
     args = parser.parse_args()
     try:
-        rodar_modelo(modelos=args.modelos, arquivos=args.arquivos,
-                     retomar=args.retomar, pasta_saida=args.pasta_saida, openrouter=args.openrouter,
-                     refazer_erros=args.refazer_erros, intervalo=args.intervalo, tentativas=args.tentativas)
+        run_model(models=args.models, files=args.files,
+                     resume=args.resume, output_dir=args.output_dir, openrouter=args.openrouter,
+                     redo_errors=args.redo_errors, interval=args.interval, attempts=args.attempts)
     except KeyboardInterrupt:
-        print("Execução interrompida. Progresso salvo; use --retomar com a mesma configuração.")
+        print("Run interrupted. Progress saved; use --resume with the same configuration.")
         return 130
     except (ValueError, OSError, RuntimeError) as exc:
-        parser.exit(1, f"Erro: {exc}\n")
+        parser.exit(1, f"Error: {exc}\n")
     return 0
 
 

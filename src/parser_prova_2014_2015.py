@@ -5,91 +5,91 @@ import pandas as pd
 import pymupdf
 
 
-# Diretórios de dados (relativos à raiz do repositório)
-raiz = pathlib.Path(__file__).resolve().parent.parent
-pasta = raiz / "data" / "raw" / "provas"
-pasta_txt = raiz / "data" / "interim" / "txt"
-pasta_txt.mkdir(parents=True, exist_ok=True)
+# Data directories (relative to the repository root)
+root = pathlib.Path(__file__).resolve().parent.parent
+exams_dir = root / "data" / "raw" / "provas"
+txt_dir = root / "data" / "interim" / "txt"
+txt_dir.mkdir(parents=True, exist_ok=True)
 
-# Arquivo de entrada
-nomes = ['prova_2014', 'prova_2015_1', 'prova_2015_2']
-provas = pd.DataFrame()
+# Input files
+names = ['prova_2014', 'prova_2015_1', 'prova_2015_2']
+exams = pd.DataFrame()
 
-for nome in nomes:
-    arquivo = pasta / (nome + ".pdf")
-    # Extração do texto do PDF
-    with pymupdf.open(arquivo) as doc:
-        conteudo = chr(12).join(page.get_text() for page in doc)
+for name in names:
+    path = exams_dir / (name + ".pdf")
+    # Extract the text from the PDF
+    with pymupdf.open(path) as doc:
+        content = chr(12).join(page.get_text() for page in doc)
 
 
-    # Salva o texto extraído
-    (pasta_txt / (nome + ".txt")).write_text(
-        conteudo,
+    # Save the extracted text
+    (txt_dir / (name + ".txt")).write_text(
+        content,
         encoding="utf-8"
     )
 
 
-    # Regex para identificar cada questão
-    regex_questao = (
-        r"(?ms)^QUESTÃO\s+(?P<numero>\d+)\s*\n"
-        r"(?P<conteudo>.*?)(?=^QUESTÃO\s+\d+|\Z)"
+    # Regex to identify each question
+    question_regex = (
+        r"(?ms)^QUESTÃO\s+(?P<number>\d+)\s*\n"
+        r"(?P<content>.*?)(?=^QUESTÃO\s+\d+|\Z)"
     )
 
 
-    # Regex para identificar as alternativas
-    regex_alternativas = (
-        r"(?ms)^(?P<alternativa>[A-E])\s*\n"
-        r"(?P<texto>.*?)(?=^[A-E]\s*$|\Z)"
+    # Regex to identify the options
+    options_regex = (
+        r"(?ms)^(?P<option>[A-E])\s*\n"
+        r"(?P<text>.*?)(?=^[A-E]\s*$|\Z)"
     )
 
 
-    # Extrai as questões
-    questoes = re.finditer(regex_questao, conteudo)
+    # Extract the questions
+    questions = re.finditer(question_regex, content)
 
-    dados_questoes = []
+    question_rows = []
 
-    for questao in questoes:
+    for question in questions:
 
-        numero = questao.group("numero")
-        conteudo_questao = questao.group("conteudo")
+        number = question.group("number")
+        question_content = question.group("content")
 
-        # Localiza o início da primeira alternativa
-        inicio_alternativas = re.search(
+        # Find where the first option starts
+        options_start = re.search(
             r"(?m)^[A-E]\s*$",
-            conteudo_questao
+            question_content
         )
 
-        if inicio_alternativas:
-            enunciado = conteudo_questao[:inicio_alternativas.start()].strip()
-            texto_alternativas = conteudo_questao[inicio_alternativas.start():]
+        if options_start:
+            enunciado = question_content[:options_start.start()].strip()
+            options_text = question_content[options_start.start():]
         else:
-            enunciado = conteudo_questao.strip()
-            texto_alternativas = ""
+            enunciado = question_content.strip()
+            options_text = ""
 
-        # Extrai as alternativas
-        alternativas = re.finditer(
-            regex_alternativas,
-            texto_alternativas
+        # Extract the options
+        options = re.finditer(
+            options_regex,
+            options_text
         )
 
-        registro = {
-            "Nquestao": numero,
+        record = {
+            "Nquestao": number,
             "enunciado": enunciado
         }
 
-        for alternativa in alternativas:
-            letra = alternativa.group("alternativa")
-            texto = alternativa.group("texto").strip()
+        for option in options:
+            letter = option.group("option")
+            text = option.group("text").strip()
 
-            registro[letra] = texto
+            record[letter] = text
 
-        dados_questoes.append(registro)
+        question_rows.append(record)
 
 
-    # Cria o DataFrame
-    df = pd.DataFrame(dados_questoes)
+    # Build the DataFrame
+    df = pd.DataFrame(question_rows)
 
-    # Garante a ordem das colunas
+    # Ensure column order
     df = df[
         ["Nquestao", "enunciado", "A", "B", "C", "D", "E"]
     ]
@@ -103,13 +103,13 @@ for nome in nomes:
         + "E) " + df["E"]
     )
 
-    id_prova = '_'.join(re.findall(r'\d+', nome))
+    id_prova = '_'.join(re.findall(r'\d+', name))
     df['id_prova'] = id_prova
 
-    # Exibe as primeiras questões
+    # Show the first questions
     print(df.head())
-    print(f"Total de questões extraídas de {nome}: {df.shape[0]}")
-    provas = pd.concat([provas, df])
+    print(f"Total questions extracted from {name}: {df.shape[0]}")
+    exams = pd.concat([exams, df])
 
-print(f"Total de questões no banco: {provas.shape[0]}")
-provas.to_csv(raiz / 'data' / 'interim' / 'provas_tjdft.csv', index=False, encoding='utf-8')
+print(f"Total questions in the dataset: {exams.shape[0]}")
+exams.to_csv(root / 'data' / 'interim' / 'provas_tjdft.csv', index=False, encoding='utf-8')
