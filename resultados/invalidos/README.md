@@ -1,14 +1,12 @@
-# Resultados inválidos — não usar em métricas
+# Invalid results — do not use in metrics
 
-Os dois CSVs desta pasta foram produzidos com a associação antiga apenas por
-`Nquestao`. Como provas diferentes repetem os números de questão, cada arquivo
-tem 900 linhas para 300 questões, com associações incorretas entre provas e
-respostas.
+The two CSVs in this folder were produced with the old merge based only on
+`Nquestao`. Since different exams repeat question numbers, each file has 900 rows
+for 300 questions, with incorrect associations between exams and answers.
 
-Seus conteúdos foram preservados integralmente apenas como histórico. **Não
-devem ser usados para calcular acurácia ou outras métricas**, nem como fonte de
-retomada. Não foi feita tentativa de recuperar as associações antigas.
+Their contents were preserved in full only as history. **They must not be used to
+compute accuracy or other metrics**, nor as a source for resuming. No attempt was
+made to recover the old associations.
 
-Serão substituídos por novas execuções do benchmark corrigido, associadas por
-`id_prova` e `Nquestao`, com validação `one_to_one`. Nenhuma nova execução foi
-feita como parte desta correção.
+They will be replaced by new runs of the fixed benchmark, merged by `id_prova` and
+`Nquestao`, with `one_to_one` validation. No new run was made as part of this fix.

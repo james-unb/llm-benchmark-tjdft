@@ -1,0 +1,18 @@
+[project]
+name = "llm-benchmark-tjdft"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "ollama>=0.6.3",
+    "pandas>=3.1.1",
+    "pymupdf>=2.1",
+    "pymupdf-layout>=2.1",
+    "pymupdf4llm>=2.1",
+    "python-dotenv>=1.2.4",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.4.0",
+    "jupyterlab>=4.6.6",
+]
