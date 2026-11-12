@@ -20,7 +20,7 @@ uv run python src/parser_prova_2014_2015.py
 uv run python src/gabaritos.py
 
 # 3. Run the benchmark (local Ollama; for OpenRouter see the section below)
-uv run python src/teste_modelo_aut.py
+uv run benchmark
 
 # 4. Run the tests
 uv run python -m unittest discover -s tests -v
@@ -66,7 +66,7 @@ uv run python src/gabaritos.py                # data/interim -> data/processed
 
 ## Local benchmark with Ollama
 
-The `src/teste_modelo_aut.py` script and the `notebooks/teste_provas.ipynb`
+The `uv run benchmark` command (entry point for `src/teste_modelo_aut.py`) and the `notebooks/teste_provas.ipynb`
 notebook share the same execution, merge and evaluation rules. By default they use
 `data/processed/provas_tjdft_com_gabarito.csv` and the models
 `gemma4:e4b-it-q4_K_M` and `gemma4:e4b-it-q8_0`.
@@ -90,14 +90,14 @@ From the repository root:
 
 ```bash
 # New run (the output directory must not contain results for this combination).
-uv run python src/teste_modelo_aut.py
+uv run benchmark
 
 # Continue the same run, preserving every attempt already recorded.
-uv run python src/teste_modelo_aut.py --resume
+uv run benchmark --resume
 
 # Another independent run, with one of the models.
-uv run python src/teste_modelo_aut.py --models gemma4:e4b-it-q4_K_M --output-dir resultados/new_run
-uv run python src/teste_modelo_aut.py --models gemma4:e4b-it-q4_K_M --output-dir resultados/new_run --resume
+uv run benchmark --models gemma4:e4b-it-q4_K_M --output-dir resultados/new_run
+uv run benchmark --models gemma4:e4b-it-q4_K_M --output-dir resultados/new_run --resume
 ```
 
 ### Models through OpenRouter
@@ -112,7 +112,7 @@ The key is never written to the results:
 
 ```bash
 cp .env.example .env   # edit it and fill in OPENROUTER_API_KEY
-uv run python src/teste_modelo_aut.py --openrouter --models <model-id>:free --output-dir resultados/openrouter
+uv run benchmark --openrouter --models <model-id>:free --output-dir resultados/openrouter
 ```
 
 Use the exact model id shown on OpenRouter. In this mode the request uses the
