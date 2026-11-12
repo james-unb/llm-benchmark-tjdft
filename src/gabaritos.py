@@ -1,15 +1,15 @@
 #---------------------------------------------------#
-#    A extração do gabarito foi feita manualmente   #
+#    The answer keys were extracted manually        #
 #---------------------------------------------------#
 
 import pandas as pd
 import re
 import pathlib
 
-# Raiz do repositório
-raiz = pathlib.Path(__file__).resolve().parent.parent
+# Repository root
+root = pathlib.Path(__file__).resolve().parent.parent
 
-gabarito_2014 = {
+answer_key_2014 = {
     "id_prova": "2014",
     "Nquestao": list(range(1, 101)),
     "gabarito": [
@@ -26,7 +26,7 @@ gabarito_2014 = {
     ],
 }
 
-gabarito_2015_1 = {
+answer_key_2015_1 = {
     "id_prova": "2015_1",
     "Nquestao": list(range(1, 101)),
     "gabarito": [
@@ -43,7 +43,7 @@ gabarito_2015_1 = {
     ],
 }
 
-gabarito_2015_2 = {
+answer_key_2015_2 = {
     "id_prova": "2015_2",
     "Nquestao": list(range(1, 101)),
     "gabarito": [
@@ -60,17 +60,17 @@ gabarito_2015_2 = {
     ],
 }
 
-gabarito_2014 = pd.DataFrame(gabarito_2014)
-gabarito_2015_1 = pd.DataFrame(gabarito_2015_1)
-gabarito_2015_2 = pd.DataFrame(gabarito_2015_2)
+answer_key_2014 = pd.DataFrame(answer_key_2014)
+answer_key_2015_1 = pd.DataFrame(answer_key_2015_1)
+answer_key_2015_2 = pd.DataFrame(answer_key_2015_2)
 
 
-gabarito = pd.concat([gabarito_2014, gabarito_2015_1, gabarito_2015_2])
+answer_keys = pd.concat([answer_key_2014, answer_key_2015_1, answer_key_2015_2])
 
-provas = pd.read_csv(raiz / "data" / "interim" / "provas_tjdft.csv")
+exams = pd.read_csv(root / "data" / "interim" / "provas_tjdft.csv")
 
-provas_e_gabaritos = provas.merge(gabarito, on = ["id_prova","Nquestao"])
-provas_e_gabaritos.to_csv(raiz / 'data' / 'processed' / 'provas_tjdft_com_gabarito.csv', index=False, encoding='utf-8')
+exams_with_answer_keys = exams.merge(answer_keys, on = ["id_prova","Nquestao"])
+exams_with_answer_keys.to_csv(root / 'data' / 'processed' / 'provas_tjdft_com_gabarito.csv', index=False, encoding='utf-8')
 
 
 

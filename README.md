@@ -4,29 +4,29 @@ This repository contains historical exam papers and answer keys organized by yea
 It also holds a benchmark that evaluates LLMs (via Ollama or OpenRouter) on the
 TJDFT exam questions.
 
-## Início rápido
+## Quick start
 
-Pré-requisitos: [uv](https://docs.astral.sh/uv/getting-started/installation/)
-e, para o benchmark local, o [Ollama](https://ollama.com/) em execução.
+Prerequisites: [uv](https://docs.astral.sh/uv/getting-started/installation/)
+and, for the local benchmark, [Ollama](https://ollama.com/) running.
 
 ```bash
-# 1. Clonar e instalar as dependências (cria o .venv com Python 3.12 e usa o uv.lock)
-git clone <url-do-repositorio>
+# 1. Clone and install the dependencies (creates the .venv with Python 3.12 and uses uv.lock)
+git clone <repository-url>
 cd llm-benchmark-tjdft
 uv sync
 
-# 2. (Opcional) Regenerar os dados a partir dos PDFs; o CSV final já está versionado
+# 2. (Optional) Regenerate the data from the PDFs; the final CSV is already versioned
 uv run python src/parser_prova_2014_2015.py
 uv run python src/gabaritos.py
 
-# 3. Rodar o benchmark (Ollama local; para OpenRouter veja a seção abaixo)
+# 3. Run the benchmark (local Ollama; for OpenRouter see the section below)
 uv run python src/teste_modelo_aut.py
 
-# 4. Rodar os testes
+# 4. Run the tests
 uv run python -m unittest discover -s tests -v
 ```
 
-Os resultados são gravados em `resultados/`. Para rodar o notebook:
+Results are written to `resultados/`. To run the notebook:
 `uv run jupyter lab notebooks/teste_provas.ipynb`.
 
 ## Repository Structure
@@ -45,7 +45,7 @@ llm-benchmark-tjdft/
 ├── src/
 │   ├── parser_prova_2014_2015.py
 │   ├── gabaritos.py
-│   └── teste_modelo_aut.py                 # local benchmark (Ollama)
+│   └── teste_modelo_aut.py                 # benchmark (Ollama / OpenRouter)
 ├── notebooks/
 │   └── teste_provas.ipynb                  # notebook version of the benchmark
 ├── resultados/                             # benchmark outputs
@@ -64,127 +64,132 @@ uv run python src/parser_prova_2014_2015.py   # data/raw/provas -> data/interim
 uv run python src/gabaritos.py                # data/interim -> data/processed
 ```
 
-## Benchmark local pelo Ollama
+## Local benchmark with Ollama
 
-O script `src/teste_modelo_aut.py` e o notebook
-`notebooks/teste_provas.ipynb` compartilham as mesmas regras de execução,
-associação e avaliação. O padrão usa `data/processed/provas_tjdft_com_gabarito.csv`
-e os modelos `gemma4:e4b-it-q4_K_M` e `gemma4:e4b-it-q8_0`.
-O prompt zero-shot, temperatura 0, seed 42, contexto 4096 e comportamento de
-raciocínio do modelo são preservados. Não há alteração explícita de `think`.
+The `src/teste_modelo_aut.py` script and the `notebooks/teste_provas.ipynb`
+notebook share the same execution, merge and evaluation rules. By default they use
+`data/processed/provas_tjdft_com_gabarito.csv` and the models
+`gemma4:e4b-it-q4_K_M` and `gemma4:e4b-it-q8_0`.
+The zero-shot prompt, temperature 0, seed 42, context size 4096 and the model's
+reasoning behavior are preserved. `think` is not changed explicitly.
+The prompts are in Portuguese because the exam questions are.
 
-Pré-requisitos: [uv](https://docs.astral.sh/uv/) (instale as dependências com
-`uv sync`; o Python 3.12 é fixado em `.python-version` e o `uv.lock` garante
-versões reproduzíveis), além do serviço Ollama local disponível. As entradas e os
-arquivos de progresso são validados antes de acessar o serviço. Modelos ausentes
-podem ser baixados na execução; há um aquecimento separado por modelo/arquivo,
-seguido de uma chamada por questão, sem repetição automática em caso de erro.
+The persisted data schema (dataset columns such as `Nquestao` and `enunciado`,
+result fields such as `modelo` and `acertou`, progress-JSON keys and the
+`resultados*` file names) is kept in Portuguese so existing results remain readable
+and resumable.
 
-Na raiz do repositório:
+Prerequisites: [uv](https://docs.astral.sh/uv/) (install the dependencies with
+`uv sync`; Python 3.12 is pinned in `.python-version` and `uv.lock` guarantees
+reproducible versions), plus a local Ollama service. Inputs and progress files
+are validated before the service is accessed. Missing models can be downloaded
+during the run; there is a separate warmup per model/file, followed by one call
+per question, with no automatic retry on error.
+
+From the repository root:
 
 ```bash
-# Nova execução (a pasta de saída não pode conter resultados dessa combinação).
+# New run (the output directory must not contain results for this combination).
 uv run python src/teste_modelo_aut.py
 
-# Continuar a mesma execução, preservando todas as tentativas já registradas.
-uv run python src/teste_modelo_aut.py --retomar
+# Continue the same run, preserving every attempt already recorded.
+uv run python src/teste_modelo_aut.py --resume
 
-# Outra execução independente, com um dos modelos.
-uv run python src/teste_modelo_aut.py --modelos gemma4:e4b-it-q4_K_M --pasta-saida resultados/nova_execucao
-uv run python src/teste_modelo_aut.py --modelos gemma4:e4b-it-q4_K_M --pasta-saida resultados/nova_execucao --retomar
+# Another independent run, with one of the models.
+uv run python src/teste_modelo_aut.py --models gemma4:e4b-it-q4_K_M --output-dir resultados/new_run
+uv run python src/teste_modelo_aut.py --models gemma4:e4b-it-q4_K_M --output-dir resultados/new_run --resume
 ```
 
-### Modelos pelo OpenRouter
+### Models through OpenRouter
 
-`--openrouter` envia as questões ao [OpenRouter](https://openrouter.ai) em vez do
-serviço Ollama local, o que permite usar modelos hospedados, inclusive os
-gratuitos (sufixo `:free`; veja [openrouter.ai/models?max_price=0](https://openrouter.ai/models?max_price=0)).
-Crie uma chave em <https://openrouter.ai/settings/keys> e coloque-a em um arquivo
-`.env` na raiz (copie de `.env.example`; o `.env` é ignorado pelo git). Uma
-`OPENROUTER_API_KEY` já exportada no shell tem prioridade sobre o `.env`.
-A chave nunca é gravada nos resultados:
+`--openrouter` sends the questions to [OpenRouter](https://openrouter.ai) instead of
+the local Ollama service, which allows hosted models, including free ones
+(`:free` suffix; see [openrouter.ai/models?max_price=0](https://openrouter.ai/models?max_price=0)).
+Create a key at <https://openrouter.ai/settings/keys> and put it in a `.env` file
+at the root (copy `.env.example`; `.env` is ignored by git). An
+`OPENROUTER_API_KEY` already exported in the shell takes priority over `.env`.
+The key is never written to the results:
 
 ```bash
-cp .env.example .env   # edite e preencha OPENROUTER_API_KEY
-uv run python src/teste_modelo_aut.py --openrouter --modelos <id-do-modelo>:free --pasta-saida resultados/openrouter
+cp .env.example .env   # edit it and fill in OPENROUTER_API_KEY
+uv run python src/teste_modelo_aut.py --openrouter --models <model-id>:free --output-dir resultados/openrouter
 ```
 
-Use o id exato do modelo mostrado no OpenRouter. Nesse modo a requisição usa a
-API HTTP do OpenRouter (via `httpx`), com `temperature` 0 e `seed` 42; `num_ctx`
-e `keep_alive` não se aplicam, não há download, aquecimento nem consulta a `ps()`
-(`carregamento` é `openrouter`) e `possivel_truncamento` fica desconhecido. A
-saída recebe o sufixo `_openrouter` e o progresso marca `"provedor": "openrouter"`,
-de modo que execuções locais e do OpenRouter não se misturam nem se retomam
-mutuamente.
+Use the exact model id shown on OpenRouter. In this mode the request uses the
+OpenRouter HTTP API (via `httpx`), with `temperature` 0 and `seed` 42; `num_ctx`
+and `keep_alive` do not apply, there is no download, warmup or `ps()` query
+(`carregamento` is `openrouter`) and `possivel_truncamento` stays unknown. The
+output gets the `_openrouter` suffix and the progress file marks
+`"provedor": "openrouter"`, so local and OpenRouter runs neither mix nor resume
+each other.
 
-Modelos gratuitos têm limites de requisições definidos pelo OpenRouter (por
-minuto e por dia). Para respeitá-los, 429 e falhas transitórias do provedor
-(500/502/503/504) são repetidos até `--tentativas` vezes (padrão 5) com espera
-crescente, respeitando `Retry-After` até um teto de 300 s (se o servidor pedir
-mais, a questão é registrada com erro em vez de repetir antes do prazo); uma
-resposta sem conteúdo (sem `choices`) também é registrada como erro;
-`--intervalo SEGUNDOS` espaça as
-requisições (ex.: `--intervalo 3` para cerca de 20 por minuto). Esgotadas as
-tentativas, o erro é registrado na questão, com a causa informada pelo provedor.
-Como `--retomar` mantém tentativas com erro, use `--retomar --refazer-erros`
-para descartar apenas as falhas e refazê-las, preservando as respostas válidas.
-Um limite diário esgotado não se resolve com repetição: aguarde o reset. Os resultados não são
-diretamente comparáveis com os do Ollama local: o servidor, a quantização e o
-modelo mudam.
+Free models have request limits set by OpenRouter (per minute and per day). To
+respect them, 429 and transient provider failures (500/502/503/504) are retried up
+to `--attempts` times (default 5) with increasing waits, honoring `Retry-After`
+up to a 300 s cap (if the server asks for more, the question is recorded with an
+error instead of retrying before the deadline); a response without content
+(no `choices`) is also recorded as an error; `--interval SECONDS` spaces out the
+requests (e.g. `--interval 3` for about 20 per minute). Once the attempts are
+exhausted, the error is recorded on the question, with the cause reported by the
+provider. Since `--resume` keeps attempts with errors, use `--resume --redo-errors`
+to discard only the failures and redo them, preserving valid answers.
+An exhausted daily limit is not solved by retrying: wait for the reset. The results
+are not directly comparable with the local Ollama ones: the server, the
+quantization and the model change.
 
-`--arquivos` aceita nomes sem extensão dentro de `data/processed`. Na retomada,
-repita os mesmos modelos, arquivos e pasta de saída. Uma alteração do modelo,
-do caminho ou conteúdo da entrada, dos prompts ou dos parâmetros recusa a
-retomada. Use uma nova pasta para uma execução independente; não há sobrescrita
-implícita. Não execute dois processos gravando na mesma pasta simultaneamente.
+`--files` accepts names without extension inside `data/processed`. When resuming,
+repeat the same models, files and output directory. A change to the model, the
+input path or content, the prompts or the parameters refuses the resume. Use a new
+directory for an independent run; nothing is overwritten implicitly. Do not run two
+processes writing to the same directory at the same time.
 
-Cada questão salva um `*.progresso.json` atomicamente, com configuração,
-identificação (`modelo`, `arquivo`, `id_prova`, `Nquestao`) e resultado, incluindo
-erros. Esse JSON é a fonte da retomada e deve ser preservado sem edição manual.
-O CSV é atualizado a cada questão e pode ser reconstruído a partir do JSON ao
-retomar, sem reenviar questões registradas. Um Ctrl-C durante a inferência
-registra a tentativa interrompida como falha e encerra a execução. Um término
-forçado do processo pode perder a tentativa em andamento que ainda não foi
-salva, mas mantém o último progresso completo.
+Each question saves a `*.progresso.json` atomically, with the configuration,
+identification (`modelo`, `arquivo`, `id_prova`, `Nquestao`) and result, including
+errors. This JSON is the source for resuming and must be kept without manual
+editing. The CSV is updated after each question and can be rebuilt from the JSON
+when resuming, without resending recorded questions. A Ctrl-C during inference
+records the interrupted attempt as a failure and stops the run. A forced process
+kill may lose the in-flight attempt that was not saved yet, but keeps the last
+complete progress.
 
-A associação usa `id_prova` e `Nquestao`, com `validate="one_to_one"`.
-Todos os registros são preservados no CSV, inclusive os ainda não processados,
-identificados por `processada=False` e sem valor em `acertou`.
-A acurácia considera somente questões processadas com gabarito A–E (ignorando
-espaços e caixa). Anuladas (`X`), sem gabarito e outros gabaritos inválidos são
-excluídos; respostas sem letra válida e falhas de inferência em questões
-avaliáveis continuam sendo não acertos. O relatório discrimina processadas,
-excluídas, avaliadas, acertos, acurácia, respostas inválidas e falhas, e identifica
-execuções parciais. As contagens de respostas inválidas e falhas podem se sobrepor.
-Sem questões avaliadas, a acurácia é apresentada como não aplicável.
+The merge uses `id_prova` and `Nquestao`, with `validate="one_to_one"`.
+All records are kept in the CSV, including the ones not processed yet,
+identified by `processada=False` and with no value in `acertou`.
+Accuracy only considers processed questions with an A–E answer key (ignoring
+whitespace and case). Annulled (`X`), missing and other invalid answer keys are
+excluded; answers without a valid letter and inference failures on evaluable
+questions still count as incorrect. The report breaks down processed, excluded,
+evaluated, correct, accuracy, invalid answers and failures, and flags partial
+runs. The counts of invalid answers and failures may overlap.
+With no evaluated questions, accuracy is shown as not applicable.
 
-A extração é conservadora: aceita declarações explícitas como `Resposta: C`,
-`Resposta: **C**` e `Resposta: (D)`. Declarações conflitantes ou texto adicional
-incerto são inválidos; não se infere uma alternativa pela justificativa.
-Métricas desconhecidas ficam como `null` no JSON e vazias no CSV, não como zero.
-`possivel_truncamento` é apenas a heurística de contagem do prompt próxima ao
-limite de contexto, e permanece desconhecida sem essa contagem.
+Extraction is conservative: it accepts explicit statements such as `Resposta: C`,
+`Resposta: **C**` and `Resposta: (D)`. Conflicting statements or extra uncertain
+text are invalid; no option is inferred from the justification.
+Unknown metrics are `null` in the JSON and empty in the CSV, not zero.
+`possivel_truncamento` is only the heuristic of a prompt token count close to the
+context limit, and stays unknown without that count.
 
-`carregamento` informa CPU, GPU, CPU/GPU parcial ou desconhecido, a partir de
-`size` e `size_vram` de [`ollama.ps()`](https://docs.ollama.com/api/ps).
-Esses campos descrevem memória carregada, não utilização computacional da GPU.
-Falhas da consulta são registradas em `erro_consulta_gpu` sem descartar respostas.
+`carregamento` reports CPU, GPU, partial CPU/GPU or unknown, from `size` and
+`size_vram` of [`ollama.ps()`](https://docs.ollama.com/api/ps).
+These fields describe loaded memory, not GPU compute utilization.
+Query failures are recorded in `erro_consulta_gpu` without discarding answers.
 
-O notebook funciona a partir da raiz ou de `notebooks`, grava por padrão em
-`resultados/notebook` e exige definir `retomar = True` para continuar.
-Os dois CSVs antigos, com associações incorretas, estão preservados em
-[`resultados/invalidos`](resultados/invalidos/README.md) e não devem ser avaliados.
+The notebook works from the root or from `notebooks`, writes by default to
+`resultados/notebook` and requires setting `resume = True` to continue.
+The two old CSVs, with incorrect merges, are preserved in
+[`resultados/invalidos`](resultados/invalidos/README.md) and must not be evaluated.
 
-### Verificação isolada
+### Isolated verification
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 uv run python -m unittest discover -s tests -v
 ```
 
-Os testes usam fixtures temporárias e clientes simulados, bloqueiam conexões de
-rede e não executam benchmarks nem downloads de modelos. Incluem execução das
-células do notebook com dados simulados. Ambiente validado nesta revisão:
-Python 3.12, gerenciado com uv (versões exatas em `uv.lock`).
+The tests use temporary fixtures and simulated clients, block network connections
+and do not run benchmarks or model downloads. They include running the notebook
+cells with simulated data. Environment validated in this revision:
+Python 3.12, managed with uv (exact versions in `uv.lock`).
 
 ## Exam Papers
 
