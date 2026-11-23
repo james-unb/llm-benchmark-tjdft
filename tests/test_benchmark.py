@@ -172,6 +172,15 @@ class BenchmarkTest(unittest.TestCase):
         self.assertEqual(set(call), {"model", "messages", "options", "keep_alive", "think"})
         self.assertIs(call["think"], False)
 
+    def test_reasoning_flag_controls_think_and_output_name(self):
+        client = Mock(chat=Mock(return_value=response()))
+        b.ask("model", "question", client, reasoning=True)
+        self.assertNotIn("think", client.chat.call_args.kwargs)
+        b.ask("model", "question", client, openrouter=True, reasoning=True)
+        self.assertNotIn("reasoning", client.chat.call_args.kwargs)
+        self.assertEqual(b.output_path("m", "f", "d", reasoning=True).name, "resultados_m_f.csv")
+        self.assertEqual(b.output_path("m", "f", "d").name, "resultados_m_f_sem_raciocinio.csv")
+
     def test_loading_cpu_partial_gpu_and_unknown(self):
         for size, vram, expected in [(100, 0, "CPU"), (100, 100, "GPU"),
                                        (100, 25, "CPU/GPU parcial"), (None, 1, "desconhecido"),
