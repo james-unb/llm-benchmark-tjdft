@@ -70,8 +70,15 @@ The `uv run benchmark` command (entry point for `src/teste_modelo_aut.py`) and t
 notebook share the same execution, merge and evaluation rules. By default they use
 `data/processed/provas_tjdft_com_gabarito.csv` and the models
 `gemma4:e4b-it-q4_K_M` and `gemma4:e4b-it-q8_0`.
-The zero-shot prompt, temperature 0, seed 42, context size 4096 and the model's
-reasoning behavior are preserved. `think` is not changed explicitly.
+The zero-shot prompt, temperature 0, seed 42 and context size 4096 are preserved.
+Reasoning is explicitly disabled (`think=False` on Ollama, `reasoning.enabled=false` on
+OpenRouter), so the model answers directly with the letter. Results produced before this
+change (config `raciocinio: padrao_do_modelo_sem_override`) used the model's default reasoning
+and cannot be resumed.
+Output files carry the `_sem_raciocinio` suffix
+(`resultados_<model>_<file>_sem_raciocinio.csv`), so they never collide with older results.
+To keep the model's default reasoning (as in the older results), pass `--with-reasoning`: nothing is
+sent to disable it and the suffix is dropped, so those runs are resumable as before.
 The prompts are in Portuguese because the exam questions are.
 
 The persisted data schema (dataset columns such as `Nquestao` and `enunciado`,

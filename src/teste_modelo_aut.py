@@ -143,9 +143,13 @@ def error_result(error):
     }
 
 
-def ask(model, prompt, client, openrouter=False):
+def ask(model, prompt, client, openrouter=False, reasoning=False):
     try:
+        # Reasoning is off unless requested (--with-reasoning). When requested, nothing is sent and the
+        # model default applies. Ollama takes `think`, OpenRouter takes `reasoning`.
         extras = {} if openrouter else {"keep_alive": "30m"}
+        if not reasoning:
+            extras.update({"reasoning": {"enabled": False}} if openrouter else {"think": False})
         r = client.chat(
             model=model,
             messages=[
@@ -292,7 +296,7 @@ class OpenRouterClient:
         except (AttributeError, TypeError, ValueError):
             return BASE_WAIT_S * 2 ** attempt
 
-    def chat(self, model, messages, options):
+    def chat(self, model, messages, options, reasoning=None):
         http = self.http or importlib.import_module("httpx")
         for attempt in range(self.attempts):
             if self.interval and self.last_start is not None:
@@ -304,7 +308,8 @@ class OpenRouterClient:
             r = http.post(
                 OPENROUTER_URL, timeout=OPENROUTER_TIMEOUT_S,
                 headers={"Authorization": f"Bearer {self.key}"},
-                json={"model": model, "messages": messages, **options},
+                json={"model": model, "messages": messages, **options,
+                      **({"reasoning": reasoning} if reasoning is not None else {})},
             )
             duration = time.perf_counter() - start
             try:
@@ -357,13 +362,13 @@ def create_openrouter_client(environment=None, interval=0, attempts=DEFAULT_ATTE
     return OpenRouterClient(key, attempts=attempts, interval=interval)
 
 
-def build_config(model, file, path, df, openrouter=False):
+def build_config(model, file, path, df, openrouter=False, reasoning=False):
     config = {
         "versao": 1, "modelo": model, "arquivo": file,
         "entrada": str(path.resolve()),
         "entrada_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "system": SYSTEM, "template": TEMPLATE, "opcoes": options(),
-        "keep_alive": "30m", "raciocinio": "padrao_do_modelo_sem_override",
+        "keep_alive": "30m", "raciocinio": "padrao_do_modelo_sem_override" if reasoning else "desligado",
         "prompts_sha256": hashlib.sha256(json.dumps(
             [build_prompt(row) for _, row in df.iterrows()], ensure_ascii=False,
         ).encode()).hexdigest(),
@@ -418,13 +423,15 @@ def load_progress(path, config, df):
     return results
 
 
-def output_path(model, file, output_dir=OUTPUT_DIR, openrouter=False):
+def output_path(model, file, output_dir=OUTPUT_DIR, openrouter=False, reasoning=False):
     safe_name = re.sub(r"[^\w.-]", "_", model) + ("_openrouter" if openrouter else "")
-    return Path(output_dir) / f"resultados_{safe_name}_{file}.csv"
+    # Suffix keeps no-reasoning runs from colliding with results that used the model's default reasoning.
+    suffix = "" if reasoning else "_sem_raciocinio"
+    return Path(output_dir) / f"resultados_{safe_name}_{file}{suffix}.csv"
 
 
 def run_model(models=MODELS, files=FILES, *, resume=False,
-                 csv_dir=CSV_DIR, output_dir=OUTPUT_DIR, client=None, openrouter=False,
+                 csv_dir=CSV_DIR, output_dir=OUTPUT_DIR, client=None, openrouter=False, reasoning=False,
                  redo_errors=False, interval=0, attempts=DEFAULT_ATTEMPTS):
     # All inputs and progress files are validated before any Ollama access.
     if not models or not files or any(not isinstance(m, str) or not m.strip() for m in models):
@@ -440,12 +447,12 @@ def run_model(models=MODELS, files=FILES, *, resume=False,
     destinations = set()
     for file, path, df in inputs:
         for model in models:
-            output = output_path(model, file, output_dir, openrouter)
+            output = output_path(model, file, output_dir, openrouter, reasoning)
             progress = output.with_suffix(".progresso.json")
             if output in destinations:
                 raise ValueError(f"Repeated combinations or conflicting output names: {output}.")
             destinations.add(output)
-            config = build_config(model, file, path, df, openrouter)
+            config = build_config(model, file, path, df, openrouter, reasoning)
             if resume:
                 results = load_progress(progress, config, df)
                 if redo_errors:
@@ -486,7 +493,7 @@ def run_model(models=MODELS, files=FILES, *, resume=False,
                     log(f"{model} | {file}: checking model availability")
                     ensure_model(model, client)
                     log(f"{model} | {file}: warming up the model")
-                    warmup = ask(model, "Oi", client)
+                    warmup = ask(model, "Oi", client, openrouter, reasoning)
                     if warmup["erro"]:
                         raise RuntimeError(f"Warmup failed for {model}: {warmup['erro']}")
                     log(f"{model} | {file}: warmup finished; {len(df) - len(recorded)} questions pending")
@@ -496,7 +503,7 @@ def run_model(models=MODELS, files=FILES, *, resume=False,
                         continue
                     interrupted = False
                     try:
-                        out = ask(model, build_prompt(row), client, openrouter)
+                        out = ask(model, build_prompt(row), client, openrouter, reasoning)
                     except KeyboardInterrupt:
                         out = error_result("Inference interrupted by the user; attempt recorded without automatic resend.")
                         interrupted = True
@@ -548,6 +555,9 @@ def create_parser():
                         help="Minimum seconds between requests with --openrouter (e.g. 3 for ~20 req/min).")
     parser.add_argument("--attempts", type=int, default=DEFAULT_ATTEMPTS,
                         help="Attempts per question with --openrouter for 429/5xx, with increasing waits.")
+    parser.add_argument("--with-reasoning", action="store_true",
+                        help="Keeps the model's default reasoning (off by default). Output files lose the "
+                             "_sem_raciocinio suffix.")
     parser.add_argument("--openrouter", action="store_true",
                         help=f"Uses OpenRouter with the key in ${OPENROUTER_KEY_VAR} (environment or .env); "
                              "use OpenRouter ids in --models (e.g. provider/model:free).")
@@ -559,7 +569,7 @@ def main():
     args = parser.parse_args()
     try:
         run_model(models=args.models, files=args.files,
-                     resume=args.resume, output_dir=args.output_dir, openrouter=args.openrouter,
+                     resume=args.resume, output_dir=args.output_dir, openrouter=args.openrouter, reasoning=args.with_reasoning,
                      redo_errors=args.redo_errors, interval=args.interval, attempts=args.attempts)
     except KeyboardInterrupt:
         print("Run interrupted. Progress saved; use --resume with the same configuration.")
