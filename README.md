@@ -75,6 +75,8 @@ Reasoning is explicitly disabled (`think=False` on Ollama, `reasoning.enabled=fa
 OpenRouter), so the model answers directly with the letter. Results produced before this
 change (config `raciocinio: padrao_do_modelo_sem_override`) used the model's default reasoning
 and cannot be resumed.
+Output files carry the `_sem_raciocinio` suffix
+(`resultados_<model>_<file>_sem_raciocinio.csv`), so they never collide with older results.
 The prompts are in Portuguese because the exam questions are.
 
 The persisted data schema (dataset columns such as `Nquestao` and `enunciado`,

@@ -422,7 +422,8 @@ def load_progress(path, config, df):
 
 def output_path(model, file, output_dir=OUTPUT_DIR, openrouter=False):
     safe_name = re.sub(r"[^\w.-]", "_", model) + ("_openrouter" if openrouter else "")
-    return Path(output_dir) / f"resultados_{safe_name}_{file}.csv"
+    # Suffix keeps no-reasoning runs from colliding with older results (reasoning on).
+    return Path(output_dir) / f"resultados_{safe_name}_{file}_sem_raciocinio.csv"
 
 
 def run_model(models=MODELS, files=FILES, *, resume=False,
