@@ -145,7 +145,7 @@ def error_result(error):
 
 def ask(model, prompt, client, openrouter=False, reasoning=False):
     try:
-        # Reasoning is off unless requested (--com-raciocinio). When requested, nothing is sent and the
+        # Reasoning is off unless requested (--with-reasoning). When requested, nothing is sent and the
         # model default applies. Ollama takes `think`, OpenRouter takes `reasoning`.
         extras = {} if openrouter else {"keep_alive": "30m"}
         if not reasoning:
@@ -555,7 +555,7 @@ def create_parser():
                         help="Minimum seconds between requests with --openrouter (e.g. 3 for ~20 req/min).")
     parser.add_argument("--attempts", type=int, default=DEFAULT_ATTEMPTS,
                         help="Attempts per question with --openrouter for 429/5xx, with increasing waits.")
-    parser.add_argument("--com-raciocinio", action="store_true",
+    parser.add_argument("--with-reasoning", action="store_true",
                         help="Keeps the model's default reasoning (off by default). Output files lose the "
                              "_sem_raciocinio suffix.")
     parser.add_argument("--openrouter", action="store_true",
@@ -569,7 +569,7 @@ def main():
     args = parser.parse_args()
     try:
         run_model(models=args.models, files=args.files,
-                     resume=args.resume, output_dir=args.output_dir, openrouter=args.openrouter, reasoning=args.com_raciocinio,
+                     resume=args.resume, output_dir=args.output_dir, openrouter=args.openrouter, reasoning=args.with_reasoning,
                      redo_errors=args.redo_errors, interval=args.interval, attempts=args.attempts)
     except KeyboardInterrupt:
         print("Run interrupted. Progress saved; use --resume with the same configuration.")
