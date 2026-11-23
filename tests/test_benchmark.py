@@ -169,7 +169,8 @@ class BenchmarkTest(unittest.TestCase):
         call = client.chat.call_args.kwargs
         self.assertEqual(call["options"], {"temperature": 0, "seed": 42, "num_ctx": 4096})
         self.assertEqual(call["messages"][0]["content"], b.SYSTEM)
-        self.assertEqual(set(call), {"model", "messages", "options", "keep_alive"})
+        self.assertEqual(set(call), {"model", "messages", "options", "keep_alive", "think"})
+        self.assertIs(call["think"], False)
 
     def test_loading_cpu_partial_gpu_and_unknown(self):
         for size, vram, expected in [(100, 0, "CPU"), (100, 100, "GPU"),
@@ -433,6 +434,7 @@ class BenchmarkTest(unittest.TestCase):
         self.assertEqual(client.warmups, 0)
         self.assertEqual(len(client.asked), 3)
         self.assertNotIn("keep_alive", client.asked[0])
+        self.assertEqual(client.asked[0]["reasoning"], {"enabled": False})
         self.assertEqual(client.asked[0]["options"], {"temperature": 0, "seed": 42})
         progress = b.output_path("model", "input", self.output_dir, openrouter=True).with_suffix(".progresso.json")
         state = json.loads(progress.read_text())

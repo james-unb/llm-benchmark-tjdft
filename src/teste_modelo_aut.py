@@ -145,7 +145,8 @@ def error_result(error):
 
 def ask(model, prompt, client, openrouter=False):
     try:
-        extras = {} if openrouter else {"keep_alive": "30m"}
+        # Reasoning is explicitly disabled: Ollama takes `think`, OpenRouter takes `reasoning`.
+        extras = {"reasoning": {"enabled": False}} if openrouter else {"keep_alive": "30m", "think": False}
         r = client.chat(
             model=model,
             messages=[
@@ -292,7 +293,7 @@ class OpenRouterClient:
         except (AttributeError, TypeError, ValueError):
             return BASE_WAIT_S * 2 ** attempt
 
-    def chat(self, model, messages, options):
+    def chat(self, model, messages, options, reasoning=None):
         http = self.http or importlib.import_module("httpx")
         for attempt in range(self.attempts):
             if self.interval and self.last_start is not None:
@@ -304,7 +305,8 @@ class OpenRouterClient:
             r = http.post(
                 OPENROUTER_URL, timeout=OPENROUTER_TIMEOUT_S,
                 headers={"Authorization": f"Bearer {self.key}"},
-                json={"model": model, "messages": messages, **options},
+                json={"model": model, "messages": messages, **options,
+                      **({"reasoning": reasoning} if reasoning is not None else {})},
             )
             duration = time.perf_counter() - start
             try:
@@ -363,7 +365,7 @@ def build_config(model, file, path, df, openrouter=False):
         "entrada": str(path.resolve()),
         "entrada_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "system": SYSTEM, "template": TEMPLATE, "opcoes": options(),
-        "keep_alive": "30m", "raciocinio": "padrao_do_modelo_sem_override",
+        "keep_alive": "30m", "raciocinio": "desligado",
         "prompts_sha256": hashlib.sha256(json.dumps(
             [build_prompt(row) for _, row in df.iterrows()], ensure_ascii=False,
         ).encode()).hexdigest(),
